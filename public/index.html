@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Domain Tracker</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700;800&family=Spline+Sans:wght@400;500;600&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <!-- login -->
+  <div class="login-bg" id="login">
+    <div class="login-card">
+      <h1><span class="logo">◆</span> Domain Tracker</h1>
+      <div class="sub">Войдите, чтобы продолжить</div>
+      <div class="login-err" id="login-err"></div>
+      <div class="field"><input id="login-user" placeholder="Логин" autocomplete="username"></div>
+      <div class="field"><input id="login-pass" type="password" placeholder="Пароль" autocomplete="current-password"></div>
+      <button class="btn" id="login-btn">Войти</button>
+    </div>
+  </div>
+
+  <!-- app -->
+  <div id="app" class="hidden">
+    <header class="topbar">
+      <div class="brand"><span class="logo">◆</span><span>DOMAIN<span class="brand-accent">TRACKER</span></span></div>
+      <nav class="tabs" id="nav"></nav>
+      <a class="logout-btn" id="logout">Выйти</a>
+    </header>
+    <div class="flash-wrap" id="flash"></div>
+    <main class="content" id="view"><div class="loading">Загрузка…</div></main>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

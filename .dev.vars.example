@@ -1,0 +1,5 @@
+SUPABASE_URL=https://YOUR-PROJECT.supabase.co
+SUPABASE_SERVICE_KEY=YOUR-SERVICE-ROLE-KEY
+APP_USER=admin
+APP_PASS=JohnSnow
+SESSION_SECRET=put-a-long-random-string-here
