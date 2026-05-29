@@ -322,3 +322,72 @@ tbody tr:last-child td{border-bottom:none}
 .records-table .row-stale td:last-child,
 table .row-stale td:last-child{background:rgba(255,105,180,.16)}
 .pill-stale{color:#ff79c6;border-color:#7a3b6b;background:rgba(255,121,198,.14)}
+
+/* ============================================================
+   СВЕТЛАЯ ТЕМА — переопределяет переменные при html.theme-light
+   ============================================================ */
+html.theme-light{
+  --bg:#f6f7f9;
+  --panel:#ffffff;
+  --panel-2:#f1f3f6;
+  --line:#dfe3ea;
+  --line-soft:#ebeef2;
+  --text:#1a2230;
+  --muted:#5b6675;
+  --accent:#d77a00;        /* контрастный амбер для светлого фона */
+  --accent-dim:#fff0d6;
+  --green:#1f8a6b;
+  --red:#c0392b;
+  --blue:#0a66c2;
+}
+html.theme-light body{
+  background:
+    radial-gradient(1200px 600px at 80% -10%, #e8edf4 0%, transparent 60%),
+    var(--bg);
+}
+html.theme-light .topbar{background:rgba(246,247,249,.92);border-bottom-color:var(--line)}
+html.theme-light .brand-accent,html.theme-light .brand .logo{color:var(--accent)}
+html.theme-light .tabs a.active,html.theme-light .seg-btn.on,
+html.theme-light .btn:not(.btn-ghost):not(.btn-danger):not(.btn-sent){color:#fff}
+html.theme-light .tab-drop>a.active{color:#fff}
+html.theme-light .btn-sent{color:#fff}
+html.theme-light .copy-btn.copied{color:#fff}
+html.theme-light .stat-block h2 .badge{color:#fff}
+html.theme-light .kpi .value.amber{color:var(--accent)}
+html.theme-light .pill-Принят,html.theme-light .pill-Выдан{background:rgba(31,138,107,.12)}
+html.theme-light .pill-Отказ{background:rgba(192,57,43,.10)}
+html.theme-light .pill-Модерация{background:rgba(10,102,194,.10)}
+html.theme-light .pill-Правки{background:rgba(215,122,0,.12)}
+html.theme-light .row-stale td{background:rgba(255,105,180,.10)}
+html.theme-light .row-stale:hover td{background:rgba(255,105,180,.16)}
+html.theme-light .pill-stale{color:#c0408a;border-color:#f0c3dc;background:rgba(255,105,180,.10)}
+html.theme-light .login-bg{background:var(--bg)}
+html.theme-light .login-card{box-shadow:0 8px 30px rgba(0,0,0,.08)}
+html.theme-light .kpi::after{background:radial-gradient(circle,var(--accent-dim),transparent 70%)}
+html.theme-light .req-card{box-shadow:0 1px 3px rgba(0,0,0,.04)}
+
+/* ---------- theme button ---------- */
+.theme-btn{
+  background:transparent;border:1px solid var(--line);color:var(--text);
+  width:36px;height:36px;border-radius:8px;cursor:pointer;font-size:16px;
+  display:inline-flex;align-items:center;justify-content:center;
+  transition:.15s;margin-right:4px;
+}
+.theme-btn:hover{border-color:var(--accent);color:var(--accent)}
+
+/* ---------- required field markers + validation ---------- */
+.req{color:var(--red);margin-left:4px;font-weight:700}
+.field input.invalid,.field select.invalid,.bulk-area.invalid{
+  border-color:var(--red);box-shadow:0 0 0 1px rgba(248,113,113,.25);
+}
+.form-err{
+  color:var(--red);font-size:13px;font-weight:500;
+  margin-top:12px;min-height:18px;
+}
+
+/* кнопка «Долго!» — в Модерации у просроченных строк */
+.btn-long{
+  background:#ff79c6;color:#1a0420;border:none;white-space:nowrap;font-weight:700;
+}
+.btn-long:hover{filter:brightness(1.08)}
+html.theme-light .btn-long{background:#c0408a;color:#fff}

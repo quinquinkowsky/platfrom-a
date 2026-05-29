@@ -8,6 +8,13 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700;800&family=Spline+Sans:wght@400;500;600&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/style.css">
+  <script>
+    // применяем сохранённую тему до отрисовки, чтобы не было «вспышки»
+    (function(){ try {
+      var t = document.cookie.split('; ').find(function(c){return c.indexOf('dt_theme=')===0;});
+      if (t && t.split('=')[1] === 'light') document.documentElement.classList.add('theme-light');
+    } catch(e){} })();
+  </script>
 </head>
 <body>
   <!-- login -->
@@ -27,6 +34,7 @@
     <header class="topbar">
       <div class="brand"><span class="logo">◆</span><span>DOMAIN<span class="brand-accent">TRACKER</span></span></div>
       <nav class="tabs" id="nav"></nav>
+      <button class="theme-btn" id="theme-toggle" title="Сменить тему">🌙</button>
       <a class="logout-btn" id="logout">Выйти</a>
     </header>
     <div class="flash-wrap" id="flash"></div>

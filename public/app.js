@@ -6,7 +6,11 @@ const LABELS = {domain:"Домен",server:"Сервер",geo:"ГЕО",seller:"�
   source:"Сетка / источник",team:"Команда",rating:"Рейтинг",
   comment:"Комментарий / почта",date_taken:"Дата взятия в работу",
   taker:"Кто взял в работу",status:"Статус"};
-const OPT_FIELDS = ["server","geo","seller","source","team","taker","status"];
+const OPT_FIELDS = ["server","geo","seller","source","team","taker","status","rating"];
+// поля, которые обязательно заполнять при создании/редактировании
+const REQUIRED_FIELDS = ["domain","server","team","rating"];
+// фиксированные варианты для Рейтинга
+const RATING_OPTIONS = ["0", "60-79", "80+"];
 const LIST_FILTERS = [["geo","ГЕО"],["team","Команда"],["taker","Участник"],
   ["source","Сетка"],["status","Статус"]];
 const SORT_STATUS = "На сортировку";
@@ -211,6 +215,12 @@ function optionsFor(field, current) {
   else if (field === "seller") vals = names("sellers");
   else if (field === "status") vals = names("statuses");
   else if (field === "geo") vals = names("geos");
+  else if (field === "rating") {
+    // фиксированный список + любое уже сохранённое значение, если оно нестандартное
+    const set = new Set(RATING_OPTIONS);
+    if (current) set.add(current);
+    return [...set];   // не сортируем, чтобы порядок 0 / 60-79 / 80+ сохранялся
+  }
   const set = new Set(vals); if (current) set.add(current);
   return [...set].sort();
 }
@@ -219,19 +229,21 @@ function openRecordModal(section, rec) {
   const isEdit = !!rec;
   const v = (f) => rec ? (rec[f] == null ? "" : rec[f]) : "";
   const grid = FIELDS.map((f) => {
+    const required = REQUIRED_FIELDS.includes(f);
+    const reqMark = required ? `<span class="req">*</span>` : "";
     let inner;
     if (OPT_FIELDS.includes(f)) {
       const opts = optionsFor(f, v(f)).map((o) =>
         `<option value="${esc(o)}" ${v(f) === o ? "selected" : ""}>${esc(o)}</option>`).join("");
-      inner = `<select id="m-${f}" ${f === "status" ? 'onchange="window.__toggleSort()"' : ""}>
+      inner = `<select id="m-${f}" data-field="${f}" ${f === "status" ? 'onchange="window.__toggleSort()"' : ""}>
         <option value=""></option>${opts}</select>`;
     } else if (f === "date_taken") {
-      inner = `<input type="date" id="m-${f}" value="${esc(v(f) || "")}">`;
+      inner = `<input type="date" id="m-${f}" data-field="${f}" value="${esc(v(f) || "")}">`;
     } else {
-      inner = `<input type="text" id="m-${f}" value="${esc(v(f))}">`;
+      inner = `<input type="text" id="m-${f}" data-field="${f}" value="${esc(v(f))}">`;
     }
     return `<div class="field ${f === "comment" ? "full" : ""}">
-      <label>${LABELS[f]}</label>${inner}</div>`;
+      <label>${LABELS[f]}${reqMark}</label>${inner}</div>`;
   }).join("");
 
   const srcChecks = names("sources").map((o) =>
@@ -246,6 +258,7 @@ function openRecordModal(section, rec) {
         <span class="hint">первая останется в «Домены», остальные продублируются в «Б/у»</span></div>
       <div class="sort-checks">${srcChecks}</div>
     </div>
+    <div class="form-err" id="m-err"></div>
     <div class="modal-foot">
       <button class="btn btn-ghost" id="m-cancel">Отмена</button>
       <button class="btn" id="m-save">Сохранить</button>
@@ -257,6 +270,20 @@ function openRecordModal(section, rec) {
   };
   $("m-cancel").onclick = closeModal;
   $("m-save").onclick = async () => {
+    // валидация обязательных полей
+    const missing = [];
+    REQUIRED_FIELDS.forEach((f) => {
+      const el = $("m-" + f);
+      const ok = el && el.value.trim() !== "";
+      if (el) el.classList.toggle("invalid", !ok);
+      if (!ok) missing.push(LABELS[f]);
+    });
+    if (missing.length) {
+      $("m-err").textContent = "Заполните: " + missing.join(", ");
+      return;
+    }
+    $("m-err").textContent = "";
+
     const body = { section };
     if (isEdit) body.id = rec.id;
     FIELDS.forEach((f) => body[f] = $("m-" + f).value);
@@ -272,31 +299,52 @@ function openRecordModal(section, rec) {
 
 function openBulkModal(section) {
   const grid = FIELDS.filter((f) => f !== "domain").map((f) => {
+    const required = REQUIRED_FIELDS.includes(f);
+    const reqMark = required ? `<span class="req">*</span>` : "";
     let inner;
     if (OPT_FIELDS.includes(f)) {
       const opts = optionsFor(f, "").map((o) => `<option value="${esc(o)}">${esc(o)}</option>`).join("");
-      inner = `<select id="b-${f}"><option value=""></option>${opts}</select>`;
-    } else if (f === "date_taken") inner = `<input type="date" id="b-${f}">`;
-    else inner = `<input type="text" id="b-${f}">`;
-    return `<div class="field ${f === "comment" ? "full" : ""}"><label>${LABELS[f]}</label>${inner}</div>`;
+      inner = `<select id="b-${f}" data-field="${f}"><option value=""></option>${opts}</select>`;
+    } else if (f === "date_taken") inner = `<input type="date" id="b-${f}" data-field="${f}">`;
+    else inner = `<input type="text" id="b-${f}" data-field="${f}">`;
+    return `<div class="field ${f === "comment" ? "full" : ""}"><label>${LABELS[f]}${reqMark}</label>${inner}</div>`;
   }).join("");
 
   showModal(`
     <h2>Оптовое добавление доменов</h2>
-    <div class="field full"><label>Список доменов — по одному в строке</label>
+    <div class="field full"><label>Список доменов — по одному в строке<span class="req">*</span></label>
       <textarea id="b-domains" rows="9" class="bulk-area"
         placeholder="example1.com&#10;example2.com&#10;…&#10;&#10;Можно с селлером: example.com, Бинго"></textarea>
       <span class="hint">После домена через запятую/Tab можно указать селлера для строки.</span>
     </div>
-    <div class="bulk-shared-title">Общие поля — применятся ко всем</div>
+    <div class="bulk-shared-title">Общие поля — применятся ко всем (* — обязательные)</div>
     <div class="form-grid">${grid}</div>
+    <div class="form-err" id="b-err"></div>
     <div class="modal-foot">
       <button class="btn btn-ghost" id="b-cancel">Отмена</button>
       <button class="btn" id="b-save">Добавить все</button>
     </div>`);
   $("b-cancel").onclick = closeModal;
   $("b-save").onclick = async () => {
-    const body = { section, domains_bulk: $("b-domains").value };
+    // валидация: список + обязательные общие поля (domain исключён — он из textarea)
+    const missing = [];
+    const textarea = $("b-domains");
+    const hasDomains = textarea.value.trim() !== "";
+    textarea.classList.toggle("invalid", !hasDomains);
+    if (!hasDomains) missing.push("Список доменов");
+    REQUIRED_FIELDS.filter((f) => f !== "domain").forEach((f) => {
+      const el = $("b-" + f);
+      const ok = el && el.value.trim() !== "";
+      if (el) el.classList.toggle("invalid", !ok);
+      if (!ok) missing.push(LABELS[f]);
+    });
+    if (missing.length) {
+      $("b-err").textContent = "Заполните: " + missing.join(", ");
+      return;
+    }
+    $("b-err").textContent = "";
+
+    const body = { section, domains_bulk: textarea.value };
     FIELDS.filter((f) => f !== "domain").forEach((f) => body[f] = $("b-" + f).value);
     try {
       const d = await api("record/bulk_add", { method: "POST", body });
@@ -471,8 +519,13 @@ async function viewStatusQueue(kind) {
     if (config.nextStatuses) {
       const opts = config.nextStatuses.map((s) =>
         `<option value="${esc(s)}">${esc(s)}</option>`).join("");
-      actionCell = `<select class="filter-sel" data-setstatus="${r.id}">
-        <option value="">— сменить статус —</option>${opts}</select>`;
+      const longBtn = stale
+        ? `<button class="btn btn-sm btn-long" data-long="${r.id}" data-dom="${esc(r.domain)}">⏳ Долго!</button>`
+        : "";
+      actionCell = `<div class="row-actions">
+        <select class="filter-sel" data-setstatus="${r.id}">
+          <option value="">— сменить статус —</option>${opts}
+        </select>${longBtn}</div>`;
     } else {
       actionCell = `<button class="btn btn-sm btn-sent" data-issue="${r.id}" data-dom="${esc(r.domain)}">✓ Выдан</button>`;
     }
@@ -534,6 +587,20 @@ async function viewStatusQueue(kind) {
         method: "POST", body: { id: b.dataset.issue, status: "Выдан" },
       });
       flash("Домен выдан"); route();
+    } catch (err) { alert("Ошибка: " + err.message); }
+  });
+
+  // «Долго!» (раздел Модерация, только просроченные)
+  document.querySelectorAll("[data-long]").forEach((b) => b.onclick = async () => {
+    if (!confirm(
+      `Домен «${b.dataset.dom}»: исходной записи поставить статус «На стоп», ` +
+      `создать копию в «Б/у» (без селлера и даты) со статусом «На сортировку»?`
+    )) return;
+    try {
+      await api("record/long_clone", {
+        method: "POST", body: { id: b.dataset.long },
+      });
+      flash("Учтено: «На стоп» + копия отправлена в Сортировку"); route();
     } catch (err) { alert("Ошибка: " + err.message); }
   });
 }
@@ -686,5 +753,24 @@ $("login-btn").onclick = doLogin;
 $("login-pass").addEventListener("keydown", (e) => { if (e.key === "Enter") doLogin(); });
 $("logout").onclick = async (e) => { e.preventDefault();
   await fetch("/api/logout", { method: "POST" }); showLogin(); };
+
+// ---------- theme toggle ----------
+function applyTheme() {
+  const isLight = document.documentElement.classList.contains("theme-light");
+  const btn = $("theme-toggle");
+  if (btn) {
+    btn.textContent = isLight ? "☀️" : "🌙";
+    btn.title = isLight ? "Включить тёмную тему" : "Включить светлую тему";
+  }
+}
+$("theme-toggle").onclick = () => {
+  const isLight = document.documentElement.classList.toggle("theme-light");
+  // cookie на 1 год, доступно JS (не HttpOnly)
+  document.cookie = "dt_theme=" + (isLight ? "light" : "dark") +
+    "; Path=/; Max-Age=31536000; SameSite=Lax";
+  applyTheme();
+};
+applyTheme();
+
 window.addEventListener("hashchange", route);
 boot();

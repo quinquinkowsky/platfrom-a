@@ -2,6 +2,10 @@ import { sb, makeToken, json } from "./_supabase.js";
 
 const FIELDS = ["domain","server","geo","seller","source","team","rating",
                 "comment","date_taken","taker","status"];
+const REQUIRED_FIELDS = ["domain","server","team","rating"];
+const FIELD_LABELS = { domain:"Домен", server:"Сервер", geo:"ГЕО", seller:"Селлер",
+  source:"Сетка", team:"Команда", rating:"Рейтинг", comment:"Комментарий",
+  date_taken:"Дата взятия в работу", taker:"Кто взял в работу", status:"Статус" };
 const SORT_STATUS = "На сортировку";
 const SENT_STATUS = "Модерация";
 const REF_TABLES = ["teams","members","servers","sources","sellers","statuses","geos"];
@@ -15,6 +19,13 @@ function cleanRecord(body) {
   // пустая дата -> NULL (колонка DATE)
   r.date_taken = r.date_taken ? r.date_taken : null;
   return r;
+}
+
+// возвращает массив незаполненных обязательных полей (русскими названиями); пусто = всё ок
+function missingRequired(rec, skip = []) {
+  return REQUIRED_FIELDS
+    .filter((f) => !skip.includes(f) && !(rec[f] || "").trim())
+    .map((f) => FIELD_LABELS[f] || f);
 }
 
 // ---------- маршрутизация ----------
@@ -119,6 +130,13 @@ export async function onRequest(context) {
       const isSorting = rec.status === SORT_STATUS;
       const id = body.id;
 
+      // если статус «На сортировку» с мультивыбором — source придёт из multi[0]
+      const skip = (isSorting && multi.length) ? ["source"] : [];
+      const miss = missingRequired(rec, skip);
+      if (miss.length) {
+        return json({ error: "Не заполнены обязательные поля: " + miss.join(", ") }, 400);
+      }
+
       if (id) {
         if (isSorting && multi.length) {
           rec.source = multi[0];
@@ -164,10 +182,42 @@ export async function onRequest(context) {
       return json({ ok: true });
     }
 
+    // «Долго!» в Модерации: исходной записи -> «На стоп»,
+    // создаём в Б/у клон без селлера и даты со статусом «На сортировку»,
+    // чтобы домен можно было отдать другому селлеру через раздел Сортировка.
+    if (path === "record/long_clone" && method === "POST") {
+      const id = body.id;
+      if (!id) return json({ error: "id обязателен" }, 400);
+      const cur = await db.select("records", `id=eq.${enc(id)}&select=*`);
+      if (!cur.length) return json({ error: "Запись не найдена" }, 404);
+      const orig = cur[0];
+
+      // 1) Исходная запись -> «На стоп»
+      await db.update("records", `id=eq.${enc(id)}`, { status: "На стоп" });
+
+      // 2) Клон в Б/у: копируем все поля, очищаем seller/date_taken/sort_group,
+      //    статус ставим «На сортировку»
+      const clone = {};
+      for (const f of FIELDS) clone[f] = orig[f] ?? "";
+      clone.seller = "";
+      clone.date_taken = null;
+      clone.status = SORT_STATUS;
+      clone.section = "reused";
+      clone.sort_group = "";
+      await db.insert("records", [clone]);
+
+      return json({ ok: true });
+    }
+
     if (path === "record/bulk_add" && method === "POST") {
       const section = body.section || "domains";
       const shared = cleanRecord(body);
       delete shared.domain;
+      // обязательные общие поля (domain проверяем построчно ниже)
+      const miss = missingRequired(shared, ["domain"]);
+      if (miss.length) {
+        return json({ error: "Не заполнены обязательные поля: " + miss.join(", ") }, 400);
+      }
       const lines = (body.domains_bulk || "").split(/\r?\n/);
       const rows = [];
       for (let line of lines) {
@@ -180,7 +230,10 @@ export async function onRequest(context) {
         if (parts.length > 1 && parts[1].trim()) rec.seller = parts[1].trim();
         rows.push(rec);
       }
-      if (rows.length) await db.insert("records", rows);
+      if (!rows.length) {
+        return json({ error: "Список доменов пуст" }, 400);
+      }
+      await db.insert("records", rows);
       return json({ ok: true, count: rows.length });
     }
 
