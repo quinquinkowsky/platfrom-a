@@ -1,7 +1,7 @@
 import { sb, makeToken, json } from "./_supabase.js";
 
 const FIELDS = ["domain","server","geo","seller","source","team","rating",
-                "comment","free","date_taken","taker","status"];
+                "comment","date_taken","taker","status"];
 const SORT_STATUS = "На сортировку";
 const SENT_STATUS = "Модерация";
 const REF_TABLES = ["teams","members","servers","sources","sellers","statuses","geos"];
@@ -98,6 +98,10 @@ export async function onRequest(context) {
           ["domain","seller","source","team","taker","status"]
             .some((k) => (r[k] || "").toLowerCase().includes(term)));
       }
+      // фильтр «занят/свободен» по полю taker (кто взял в работу)
+      const avail = url.searchParams.get("avail") || "";
+      if (avail === "busy") rows = rows.filter((r) => (r.taker || "").trim() !== "");
+      else if (avail === "free") rows = rows.filter((r) => (r.taker || "").trim() === "");
       // опции фильтров — только встречающиеся в этом разделе
       const all = await db.select("records",
         `section=eq.${enc(section)}&select=geo,team,taker,source,status`);
@@ -149,6 +153,14 @@ export async function onRequest(context) {
 
     if (path === "record/delete" && method === "POST") {
       await db.remove("records", `id=eq.${enc(body.id)}`);
+      return json({ ok: true });
+    }
+
+    if (path === "record/set_status" && method === "POST") {
+      const id = body.id;
+      const status = (body.status || "").trim();
+      if (!id || !status) return json({ error: "id и status обязательны" }, 400);
+      await db.update("records", `id=eq.${enc(id)}`, { status });
       return json({ ok: true });
     }
 

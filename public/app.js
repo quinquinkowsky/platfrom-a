@@ -1,10 +1,10 @@
 "use strict";
 
 const FIELDS = ["domain","server","geo","seller","source","team","rating",
-                "comment","free","date_taken","taker","status"];
+                "comment","date_taken","taker","status"];
 const LABELS = {domain:"Домен",server:"Сервер",geo:"ГЕО",seller:"Селлер",
   source:"Сетка / источник",team:"Команда",rating:"Рейтинг",
-  comment:"Комментарий / почта",free:"Свободен",date_taken:"Дата взятия в работу",
+  comment:"Комментарий / почта",date_taken:"Дата взятия в работу",
   taker:"Кто взял в работу",status:"Статус"};
 const OPT_FIELDS = ["server","geo","seller","source","team","taker","status"];
 const LIST_FILTERS = [["geo","ГЕО"],["team","Команда"],["taker","Участник"],
@@ -67,6 +67,8 @@ function renderNav() {
     <a href="#/sorting" data-v="sorting">Сортировка</a>
     <div class="tab-drop"><a data-v="sending">На отправку ▾</a>
       <div class="tab-menu">${sendMenu}</div></div>
+    <a href="#/moderation" data-v="moderation">Модерация</a>
+    <a href="#/expected" data-v="expected">Ожидаемое</a>
     <a href="#/stats" data-v="stats">Статистика</a>
     <a href="#/settings" data-v="settings">Справочники</a>`;
 }
@@ -78,7 +80,10 @@ function setActive(view) {
 // ---------- router ----------
 async function route() {
   const hash = location.hash || "#/domains";
-  const parts = hash.slice(2).split("/");   // remove "#/"
+  // отделяем query-string ДО разбиения по "/", иначе parts[0] окажется
+  // вида "stats?period=month..." и не совпадёт с "stats"
+  const pathPart = hash.slice(2).split("?")[0];
+  const parts = pathPart.split("/");
   const view = parts[0] || "domains";
   setActive(view === "reused" ? "reused" : view);
   const el = $("view");
@@ -88,6 +93,8 @@ async function route() {
     else if (view === "reused") await viewRecords("reused");
     else if (view === "sorting") await viewSorting();
     else if (view === "sending") await viewSending(parts[1] || "0");
+    else if (view === "moderation") await viewStatusQueue("moderation");
+    else if (view === "expected") await viewStatusQueue("expected");
     else if (view === "stats") await viewStats();
     else if (view === "settings") await viewSettings();
     else await viewRecords("domains");
@@ -101,7 +108,7 @@ async function route() {
 async function viewRecords(section) {
   const params = new URLSearchParams(section === "reused" ? { section } : { section });
   const qs = new URLSearchParams(location.hash.split("?")[1] || "");
-  ["q", ...LIST_FILTERS.map((f) => f[0])].forEach((k) => {
+  ["q", "avail", ...LIST_FILTERS.map((f) => f[0])].forEach((k) => {
     if (qs.get(k)) params.set(k, qs.get(k));
   });
   const data = await api("records?" + params.toString());
@@ -116,14 +123,27 @@ async function viewRecords(section) {
     return `<select class="filter-sel" data-filter="${f}">
       <option value="">${esc(label)}: все</option>${opts}</select>`;
   }).join("");
+  const availVal = qs.get("avail") || "";
+  const availSelect = `<select class="filter-sel" data-filter="avail">
+    <option value="">Занятость: все</option>
+    <option value="free" ${availVal === "free" ? "selected" : ""}>Свободен</option>
+    <option value="busy" ${availVal === "busy" ? "selected" : ""}>Занят</option>
+  </select>`;
 
-  const body = rows.map((r) => `
+  const anyFilter = q || Object.values(sel).some(Boolean) || availVal;
+
+  const body = rows.map((r) => {
+    const busy = (r.taker || "").trim() !== "";
+    const availPill = busy
+      ? `<span class="pill pill-busy">● занят</span>`
+      : `<span class="pill pill-free">○ свободен</span>`;
+    return `
     <tr>
       <td class="mono">${esc(r.domain)}</td>
       <td class="mono dim">${esc(r.server)}</td>
       <td>${esc(r.geo)}</td><td>${esc(r.seller)}</td><td>${esc(r.source)}</td>
       <td>${esc(r.team)}</td><td class="dim">${esc(r.rating)}</td>
-      <td class="dim">${esc(r.free)}</td><td class="mono dim">${esc(r.date_taken || "")}</td>
+      <td>${availPill}</td><td class="mono dim">${esc(r.date_taken || "")}</td>
       <td>${esc(r.taker)}</td>
       <td>${r.status ? `<span class="pill pill-${esc((r.status||"").replace(/ /g,""))}">${esc(r.status)}</span>` : ""}</td>
       <td class="dim">${esc(r.comment)}</td>
@@ -131,9 +151,9 @@ async function viewRecords(section) {
         <button class="btn-ghost btn-sm" data-edit='${esc(JSON.stringify(r))}'>✎</button>
         <button class="btn-danger btn-sm" data-del="${r.id}" data-dom="${esc(r.domain)}">✕</button>
       </div></td>
-    </tr>`).join("");
+    </tr>`;
+  }).join("");
 
-  const anyFilter = q || Object.values(sel).some(Boolean);
   $("view").innerHTML = `
     <div class="sec-head">
       <div><h1>${esc(title)}</h1>
@@ -145,13 +165,13 @@ async function viewRecords(section) {
     </div>
     <div class="filter-bar">
       <input class="search" id="f-q" value="${esc(q)}" placeholder="Поиск: домен, селлер…">
-      ${filterSelects}
+      ${filterSelects}${availSelect}
       <button class="btn btn-sm" id="apply-filter">Применить</button>
       ${anyFilter ? `<a class="reset-link" id="reset-filter">Сбросить</a>` : ""}
     </div>
     <div class="table-wrap">${rows.length ? `<table class="records-table">
       <thead><tr><th>Домен</th><th>Сервер</th><th>ГЕО</th><th>Селлер</th><th>Сетка</th>
-        <th>Команда</th><th>Рейтинг</th><th>Свободен</th><th>Дата</th><th>Кто взял</th>
+        <th>Команда</th><th>Рейтинг</th><th>Занятость</th><th>Дата</th><th>Кто взял</th>
         <th>Статус</th><th>Коммент</th><th>Действия</th></tr></thead>
       <tbody>${body}</tbody></table>` :
       `<div class="empty">Нет записей.</div>`}</div>`;
@@ -378,6 +398,144 @@ function fallbackCopy(text, done) {
   document.body.appendChild(ta); ta.select();
   try { document.execCommand("copy"); } catch (e) {}
   document.body.removeChild(ta); done();
+}
+
+// ---------- view: Модерация / Ожидаемое ----------
+// kind: "moderation" -> входной статус "Модерация", в выпадашке смена статуса
+// kind: "expected"   -> входной статус "Принят",    одна кнопка "Выдан"
+async function viewStatusQueue(kind) {
+  const config = {
+    moderation: {
+      title: "В процессе модерации",
+      sub: "Все домены со статусом «Модерация». Розовым подсвечены те, что висят больше 30 дней.",
+      inStatus: "Модерация",
+      nextStatuses: ["На стоп", "Принят", "Отказ", "Правки"],
+      hl: true,
+    },
+    expected: {
+      title: "Ожидаемое",
+      sub: "Домены со статусом «Принят». Нажмите «Выдан», когда домен передан.",
+      inStatus: "Принят",
+      nextStatuses: null,
+      hl: false,
+    },
+  }[kind];
+
+  const qs = new URLSearchParams(location.hash.split("?")[1] || "");
+  const filters = [["team", "Команда"], ["source", "Сетка"], ["taker", "Участник"]];
+  const sel = {}; filters.forEach(([f]) => sel[f] = qs.get(f) || "");
+
+  // тянем все записи с нужным статусом одним запросом
+  const params = new URLSearchParams({ section: "domains" });   // временно
+  // используем общий endpoint /api/records, но без раздела —
+  // фильтруем по статусу на клиенте уже отдадим всех; сервер требует section.
+  // Делаем два запроса (domains+reused) и склеиваем — это редкий запрос, ок.
+  const [d1, d2] = await Promise.all([
+    api("records?section=domains&status=" + encodeURIComponent(config.inStatus)),
+    api("records?section=reused&status=" + encodeURIComponent(config.inStatus)),
+  ]);
+  let rows = [...d1.rows, ...d2.rows];
+
+  // применяем фильтры
+  for (const [f] of filters) {
+    if (sel[f]) rows = rows.filter((r) => (r[f] || "") === sel[f]);
+  }
+  rows.sort((a, b) => (a.date_taken || "").localeCompare(b.date_taken || ""));
+
+  // опции фильтров — только из видимого набора (до фильтрации тех же полей)
+  const baseRows = [...d1.rows, ...d2.rows];
+  const optsFor = (f) => [...new Set(baseRows.map((r) => r[f]).filter(Boolean))].sort();
+  const filterSelects = filters.map(([f, label]) => {
+    const opts = optsFor(f).map((o) =>
+      `<option value="${esc(o)}" ${sel[f] === o ? "selected" : ""}>${esc(o)}</option>`).join("");
+    return `<select class="filter-sel" data-qfilter="${f}">
+      <option value="">${esc(label)}: все</option>${opts}</select>`;
+  }).join("");
+  const anyFilter = Object.values(sel).some(Boolean);
+
+  // подсчёт дней «висит» — от date_taken до сегодня
+  const today = new Date();
+  const daysAgo = (s) => {
+    if (!s) return null;
+    const d = new Date(s + "T00:00:00Z"); if (isNaN(d)) return null;
+    return Math.floor((today - d) / 86400000);
+  };
+
+  const body = rows.map((r) => {
+    const age = daysAgo(r.date_taken);
+    const stale = config.hl && age !== null && age > 30;
+    const ageBadge = age == null ? `<span class="dim">—</span>`
+      : (stale ? `<span class="pill pill-stale">${age} дн.</span>`
+               : `<span class="dim">${age} дн.</span>`);
+    let actionCell;
+    if (config.nextStatuses) {
+      const opts = config.nextStatuses.map((s) =>
+        `<option value="${esc(s)}">${esc(s)}</option>`).join("");
+      actionCell = `<select class="filter-sel" data-setstatus="${r.id}">
+        <option value="">— сменить статус —</option>${opts}</select>`;
+    } else {
+      actionCell = `<button class="btn btn-sm btn-sent" data-issue="${r.id}" data-dom="${esc(r.domain)}">✓ Выдан</button>`;
+    }
+    return `<tr class="${stale ? "row-stale" : ""}">
+      <td class="mono">${esc(r.domain)}</td>
+      <td>${esc(r.team)}</td>
+      <td>${esc(r.source)}</td>
+      <td>${esc(r.seller)}</td>
+      <td>${esc(r.taker)}</td>
+      <td class="mono dim">${esc(r.date_taken || "")}</td>
+      <td>${ageBadge}</td>
+      <td>${actionCell}</td>
+    </tr>`;
+  }).join("");
+
+  $("view").innerHTML = `
+    <div class="sec-head">
+      <div><h1>${esc(config.title)}</h1>
+        <div class="sub">${esc(config.sub)} ${anyFilter ? "Найдено" : "Всего"}: ${rows.length}.</div>
+      </div>
+    </div>
+    <div class="filter-bar">
+      ${filterSelects}
+      ${anyFilter ? `<a class="reset-link" id="q-reset">Сбросить</a>` : ""}
+    </div>
+    <div class="table-wrap">${rows.length ? `<table>
+      <thead><tr><th>Домен</th><th>Команда</th><th>Сетка</th><th>Селлер</th>
+        <th>Участник</th><th>Дата</th><th>На модерации</th><th>Действие</th></tr></thead>
+      <tbody>${body}</tbody></table>` :
+      `<div class="empty">Нет доменов в этом списке.</div>`}</div>`;
+
+  // фильтры
+  const applyFilter = () => {
+    const p = new URLSearchParams();
+    document.querySelectorAll("[data-qfilter]").forEach((s) => {
+      if (s.value) p.set(s.dataset.qfilter, s.value);
+    });
+    location.hash = `#/${kind}${p.toString() ? "?" + p.toString() : ""}`;
+  };
+  document.querySelectorAll("[data-qfilter]").forEach((s) => s.onchange = applyFilter);
+  if ($("q-reset")) $("q-reset").onclick = (e) => { e.preventDefault(); location.hash = "#/" + kind; };
+
+  // смена статуса (раздел Модерация)
+  document.querySelectorAll("[data-setstatus]").forEach((s) => s.onchange = async (e) => {
+    const newStatus = e.target.value; if (!newStatus) return;
+    try {
+      await api("record/set_status", {
+        method: "POST", body: { id: s.dataset.setstatus, status: newStatus },
+      });
+      flash(`Статус изменён на «${newStatus}»`); route();
+    } catch (err) { alert("Ошибка: " + err.message); }
+  });
+
+  // выдача (раздел Ожидаемое)
+  document.querySelectorAll("[data-issue]").forEach((b) => b.onclick = async () => {
+    if (!confirm(`Поставить домену «${b.dataset.dom}» статус «Выдан»?`)) return;
+    try {
+      await api("record/set_status", {
+        method: "POST", body: { id: b.dataset.issue, status: "Выдан" },
+      });
+      flash("Домен выдан"); route();
+    } catch (err) { alert("Ошибка: " + err.message); }
+  });
 }
 
 // ---------- view: stats ----------

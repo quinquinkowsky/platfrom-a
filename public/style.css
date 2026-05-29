@@ -311,3 +311,14 @@ tbody tr:last-child td{border-bottom:none}
 .logout-btn:hover{border-color:var(--red);color:var(--red)}
 .loading{padding:40px;text-align:center;color:var(--muted)}
 .hidden{display:none!important}
+
+/* свободен/занят бейджи */
+.pill-free{color:var(--green);border-color:#2d5a4d;background:rgba(78,201,168,.1)}
+.pill-busy{color:var(--muted);border-color:var(--line);background:transparent}
+
+/* Модерация: подсветка просроченных и бейдж возраста */
+.row-stale td{background:rgba(255,105,180,.12)}
+.row-stale:hover td{background:rgba(255,105,180,.18)}
+.records-table .row-stale td:last-child,
+table .row-stale td:last-child{background:rgba(255,105,180,.16)}
+.pill-stale{color:#ff79c6;border-color:#7a3b6b;background:rgba(255,121,198,.14)}
