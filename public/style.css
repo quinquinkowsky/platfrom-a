@@ -391,3 +391,24 @@ html.theme-light .req-card{box-shadow:0 1px 3px rgba(0,0,0,.04)}
 }
 .btn-long:hover{filter:brightness(1.08)}
 html.theme-light .btn-long{background:#c0408a;color:#fff}
+
+/* ---------- упрощённый отчёт ---------- */
+.simple-card{
+  background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+  padding:8px 0;
+}
+.simple-line{
+  display:flex;align-items:center;gap:16px;padding:12px 18px;
+  border-bottom:1px solid var(--line-soft);flex-wrap:wrap;
+}
+.simple-line:last-child{border-bottom:none}
+.simple-src{
+  font-family:"Archivo",sans-serif;font-weight:700;font-size:15px;color:var(--accent);
+  min-width:130px;
+}
+.simple-vals{color:var(--text);font-size:14px;flex:1}
+.simple-vals .kv{display:inline-block;margin-right:2px}
+.simple-vals .k{color:var(--muted)}
+.simple-vals b{color:var(--text);font-weight:700;font-family:"JetBrains Mono",monospace}
+a.seg-btn{text-decoration:none;display:inline-flex;align-items:center}
+.head-actions .seg{border:1px solid var(--line);border-radius:9px;overflow:hidden;display:inline-flex}

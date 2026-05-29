@@ -12,6 +12,7 @@ const REF_TABLES = ["teams","members","servers","sources","sellers","statuses","
 const LIST_FILTERS = ["geo","team","taker","source","status"];
 
 const enc = (v) => encodeURIComponent(v);
+const today = () => new Date().toISOString().slice(0, 10);
 
 function cleanRecord(body) {
   const r = {};
@@ -138,21 +139,30 @@ export async function onRequest(context) {
       }
 
       if (id) {
+        // если статус изменился — обновляем дату изменения статуса
+        const cur = await db.select("records",
+          `id=eq.${enc(id)}&select=status,sort_group,status_changed_at`);
+        const prevStatus = (cur[0] && cur[0].status) || "";
+        const statusChanged = (rec.status || "") !== prevStatus;
+        if (statusChanged && rec.status) rec.status_changed_at = today();
+
         if (isSorting && multi.length) {
           rec.source = multi[0];
-          const cur = await db.select("records", `id=eq.${enc(id)}&select=sort_group`);
           const grp = (cur[0] && cur[0].sort_group) ? cur[0].sort_group : `g${id}`;
           await db.update("records", `id=eq.${enc(id)}`, { ...rec, sort_group: grp });
           await db.remove("records",
             `sort_group=eq.${enc(grp)}&id=neq.${enc(id)}&section=eq.reused`);
           const dups = multi.slice(1).map((src) =>
-            ({ ...rec, section: "reused", source: src, sort_group: grp }));
+            ({ ...rec, section: "reused", source: src, sort_group: grp,
+               status_changed_at: today() }));
           if (dups.length) await db.insert("records", dups);
           return json({ ok: true });
         }
         await db.update("records", `id=eq.${enc(id)}`, rec);
         return json({ ok: true });
       } else {
+        // новая запись: если статус задан — ставим дату его выставления
+        if (rec.status) rec.status_changed_at = today();
         if (isSorting && multi.length) {
           rec.source = multi[0];
           const ins = await db.insert("records", [{ ...rec, section }]);
@@ -178,7 +188,8 @@ export async function onRequest(context) {
       const id = body.id;
       const status = (body.status || "").trim();
       if (!id || !status) return json({ error: "id и status обязательны" }, 400);
-      await db.update("records", `id=eq.${enc(id)}`, { status });
+      await db.update("records", `id=eq.${enc(id)}`,
+        { status, status_changed_at: today() });
       return json({ ok: true });
     }
 
@@ -192,11 +203,12 @@ export async function onRequest(context) {
       if (!cur.length) return json({ error: "Запись не найдена" }, 404);
       const orig = cur[0];
 
-      // 1) Исходная запись -> «На стоп»
-      await db.update("records", `id=eq.${enc(id)}`, { status: "На стоп" });
+      // 1) Исходная запись -> «На стоп» + дата смены статуса
+      await db.update("records", `id=eq.${enc(id)}`,
+        { status: "На стоп", status_changed_at: today() });
 
       // 2) Клон в Б/у: копируем все поля, очищаем seller/date_taken/sort_group,
-      //    статус ставим «На сортировку»
+      //    статус ставим «На сортировку», status_changed_at = сегодня
       const clone = {};
       for (const f of FIELDS) clone[f] = orig[f] ?? "";
       clone.seller = "";
@@ -204,6 +216,7 @@ export async function onRequest(context) {
       clone.status = SORT_STATUS;
       clone.section = "reused";
       clone.sort_group = "";
+      clone.status_changed_at = today();
       await db.insert("records", [clone]);
 
       return json({ ok: true });
@@ -220,6 +233,7 @@ export async function onRequest(context) {
       }
       const lines = (body.domains_bulk || "").split(/\r?\n/);
       const rows = [];
+      const stamp = shared.status ? today() : null;
       for (let line of lines) {
         line = line.trim();
         if (!line) continue;
@@ -228,6 +242,7 @@ export async function onRequest(context) {
         if (!domain) continue;
         const rec = { ...shared, section, domain };
         if (parts.length > 1 && parts[1].trim()) rec.seller = parts[1].trim();
+        if (stamp) rec.status_changed_at = stamp;
         rows.push(rec);
       }
       if (!rows.length) {
@@ -273,10 +288,10 @@ export async function onRequest(context) {
     if (path === "sending/mark_sent" && method === "POST") {
       const ids = (body.ids || []).map(String).filter(Boolean);
       if (ids.length) {
-        const today = new Date().toISOString().slice(0, 10);
+        const d = today();
         const inList = ids.map(enc).join(",");
         await db.update("records", `id=in.(${inList})`,
-          { status: SENT_STATUS, date_taken: today });
+          { status: SENT_STATUS, date_taken: d, status_changed_at: d });
       }
       return json({ ok: true, count: ids.length });
     }
@@ -286,6 +301,12 @@ export async function onRequest(context) {
       const period = url.searchParams.get("period") || "all";
       const value = url.searchParams.get("value") || "";
       return json(await computeStats(db, period, value));
+    }
+    if (path === "stats_simple" && method === "GET") {
+      const period = url.searchParams.get("period") || "all";
+      const value = url.searchParams.get("value") || "";
+      const team = url.searchParams.get("team") || "";
+      return json(await computeSimpleStats(db, period, value, team));
     }
 
     return json({ error: "not found", path }, 404);
@@ -420,5 +441,87 @@ async function computeStats(db, period, value) {
     by_team_month, by_member_month, month_total,
     grand_total: rows.length, period, value, applied,
     month_options, week_options,
+  };
+}
+
+// ---------- упрощённый отчёт ----------
+// Два блока:
+//   1) «По сеткам» — фильтрация по date_taken (когда взяли в работу)
+//   2) «Аккаунты» — фильтрация по status_changed_at (когда поменялся статус)
+// + общий фильтр Команда (или все)
+async function computeSimpleStats(db, period, value, team) {
+  const all = await db.select("records", "select=*&order=id.asc");
+
+  // справочники + дополнения из фактических значений
+  const refList = async (t) =>
+    (await db.select(t, "select=name&order=name.asc")).map((r) => r.name);
+  const distinct = (field, rows) =>
+    [...new Set(rows.map((r) => r[field]).filter(Boolean))];
+
+  let teamsAll = await refList("teams");
+  for (const t of distinct("team", all)) if (!teamsAll.includes(t)) teamsAll.push(t);
+  let sourcesAll = await refList("sources");
+  for (const s of distinct("source", all)) if (!sourcesAll.includes(s)) sourcesAll.push(s);
+
+  // опции периода
+  const monthOpts = [...new Set(all.map((r) => monthLabel(r.date_taken)))]
+    .filter((m) => m !== "Без даты").sort();
+  const weekOpts = [...new Set(all.map((r) => weekLabel(r.date_taken)))]
+    .filter((w) => w !== "Без даты").sort();
+  const month_options = monthOpts.map((m) => ({ value: m, label: m }));
+  const week_options = weekOpts.map((w) => ({ value: w, label: w }));
+
+  // период применяем к КОНКРЕТНОЙ дате (по сеткам -> date_taken, по аккаунтам -> status_changed_at)
+  const inPeriod = (dateStr) => {
+    if (period === "all") return true;
+    if (!dateStr) return false;
+    if (period === "month") return monthLabel(dateStr) === value;
+    if (period === "week") return weekLabel(dateStr) === value;
+    return true;
+  };
+
+  // фильтрация по команде применяется к обоим блокам
+  const teamFilter = (r) => !team || r.team === team;
+
+  // ----- Блок 1: по сеткам, дата = date_taken -----
+  // Для каждой сетки считаем разрез по статусам:
+  //   принято (Принят), выдано (Выдан), модерация (Модерация),
+  //   отказ (Отказ), на стоп (На стоп), правки (Правки)
+  const NET_STATUSES = ["Принят", "Выдан", "Модерация", "Отказ", "На стоп", "Правки"];
+  const netRows = all.filter((r) => teamFilter(r) && inPeriod(r.date_taken));
+  const netBlock = sourcesAll.map((src) => {
+    const counts = {};
+    NET_STATUSES.forEach((st) => {
+      counts[st] = netRows.filter((r) => r.source === src && r.status === st).length;
+    });
+    const total = Object.values(counts).reduce((a, b) => a + b, 0);
+    return { source: src, counts, total };
+  }).filter((row) => row.total > 0);   // показываем только непустые сетки
+
+  // ----- Блок 2: аккаунты, дата = status_changed_at -----
+  // Для каждой сетки:
+  //   получено = «Выдан» (когда был выставлен этот статус)
+  //   ожидаем  = «Принят» (когда был выставлен этот статус)
+  const ACC_STATUSES = ["Выдан", "Принят"];
+  const accRows = all.filter((r) => teamFilter(r) && inPeriod(r.status_changed_at));
+  const accBlock = sourcesAll.map((src) => {
+    const got = accRows.filter((r) => r.source === src && r.status === "Выдан").length;
+    const wait = accRows.filter((r) => r.source === src && r.status === "Принят").length;
+    return { source: src, got, wait, total: got + wait };
+  }).filter((row) => row.total > 0);
+
+  // подпись периода
+  let applied = "За всё время";
+  if (period === "month" && value) applied = "Месяц: " + value;
+  else if (period === "week" && value) applied = value;
+
+  return {
+    teams: teamsAll, team, period, value, applied,
+    month_options, week_options,
+    net_statuses: NET_STATUSES, acc_statuses: ACC_STATUSES,
+    net_block: netBlock,    // по сеткам (от date_taken)
+    acc_block: accBlock,    // аккаунты (от status_changed_at)
+    net_total: netRows.length,
+    acc_total: accRows.length,
   };
 }

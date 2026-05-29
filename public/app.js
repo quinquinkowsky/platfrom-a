@@ -608,6 +608,7 @@ async function viewStatusQueue(kind) {
 // ---------- view: stats ----------
 async function viewStats() {
   const qs = new URLSearchParams(location.hash.split("?")[1] || "");
+  if (qs.get("mode") === "simple") return viewStatsSimple(qs);
   const period = qs.get("period") || "all", value = qs.get("value") || "";
   const s = await api(`stats?period=${period}&value=${encodeURIComponent(value)}`);
   const cell = (v) => v ? `<span>${v}</span>` : `<span class="zero">0</span>`;
@@ -664,7 +665,14 @@ async function viewStats() {
 
   $("view").innerHTML = `
     <div class="sec-head"><div><h1>Статистика</h1>
-      <div class="sub">Считается автоматически из «Домены» и «Б/у».</div></div></div>
+      <div class="sub">Считается автоматически из «Домены» и «Б/у».</div></div>
+      <div class="head-actions">
+        <div class="seg">
+          <button class="seg-btn on">Полный</button>
+          <a class="seg-btn" href="#/stats?mode=simple">Упрощённый отчёт</a>
+        </div>
+      </div>
+    </div>
     <div class="filter-bar">
       <span class="filter-label">Период:</span>
       <div class="seg">
@@ -686,6 +694,104 @@ async function viewStats() {
   });
   if ($("month-sel")) $("month-sel").onchange = (e) => { if (e.target.value) location.hash = `#/stats?period=month&value=${encodeURIComponent(e.target.value)}`; };
   if ($("week-sel")) $("week-sel").onchange = (e) => { if (e.target.value) location.hash = `#/stats?period=week&value=${encodeURIComponent(e.target.value)}`; };
+}
+
+// ---------- view: stats (упрощённый отчёт) ----------
+async function viewStatsSimple(qs) {
+  const period = qs.get("period") || "all";
+  const value = qs.get("value") || "";
+  const team = qs.get("team") || "";
+  const params = new URLSearchParams({ period, value, team });
+  const s = await api("stats_simple?" + params.toString());
+  const cell = (v) => v ? `<span>${v}</span>` : `<span class="zero">0</span>`;
+
+  // helper to rebuild URL with patched params
+  const linkWith = (patch) => {
+    const p = new URLSearchParams({ mode: "simple", period, value, team });
+    for (const [k, v] of Object.entries(patch)) {
+      if (v === null || v === "") p.delete(k); else p.set(k, v);
+    }
+    return "#/stats?" + p.toString();
+  };
+
+  const monthSel = `<select class="filter-sel" id="month-sel" style="${s.period === "month" ? "" : "display:none"}">
+    <option value="">— выберите месяц —</option>
+    ${s.month_options.map((o) => `<option value="${esc(o.value)}" ${s.period === "month" && s.value === o.value ? "selected" : ""}>${esc(o.label)}</option>`).join("")}</select>`;
+  const weekSel = `<select class="filter-sel" id="week-sel" style="${s.period === "week" ? "" : "display:none"}">
+    <option value="">— выберите неделю —</option>
+    ${s.week_options.map((o) => `<option value="${esc(o.value)}" ${s.period === "week" && s.value === o.value ? "selected" : ""}>${esc(o.label)}</option>`).join("")}</select>`;
+
+  // блок 1 — по сеткам (по date_taken)
+  const NET_LABELS = { "Принят":"принято", "Выдан":"выдано", "Модерация":"модерация",
+    "Отказ":"отказ", "На стоп":"на стоп", "Правки":"правки" };
+  const netList = s.net_block.length ? s.net_block.map((row) => {
+    const parts = s.net_statuses.map((st) =>
+      `<span class="kv"><span class="k">${NET_LABELS[st] || st}:</span> <b>${row.counts[st]}</b></span>`
+    ).join(" · ");
+    return `<div class="simple-line"><div class="simple-src">${esc(row.source)}</div>
+      <div class="simple-vals">${parts}</div></div>`;
+  }).join("") : `<div class="empty">Нет данных за выбранный период</div>`;
+
+  // блок 2 — аккаунты (по status_changed_at)
+  const accList = s.acc_block.length ? s.acc_block.map((row) =>
+    `<div class="simple-line"><div class="simple-src">${esc(row.source)}</div>
+      <div class="simple-vals">
+        <span class="kv"><span class="k">получено:</span> <b>${row.got}</b></span> · 
+        <span class="kv"><span class="k">ожидаем:</span> <b>${row.wait}</b></span>
+      </div></div>`).join("") : `<div class="empty">Нет данных за выбранный период</div>`;
+
+  // выпадашка команд
+  const teamOptions = `<option value="">Все команды</option>` +
+    s.teams.map((t) => `<option value="${esc(t)}" ${team === t ? "selected" : ""}>${esc(t)}</option>`).join("");
+
+  $("view").innerHTML = `
+    <div class="sec-head"><div><h1>Упрощённый отчёт</h1>
+      <div class="sub">Сетки считаются по дате взятия в работу. Аккаунты — по дате смены статуса.</div></div>
+      <div class="head-actions">
+        <div class="seg">
+          <a class="seg-btn" href="#/stats">Полный</a>
+          <button class="seg-btn on">Упрощённый отчёт</button>
+        </div>
+      </div>
+    </div>
+    <div class="filter-bar">
+      <select class="filter-sel" id="team-sel">${teamOptions}</select>
+      <span class="filter-label">Период:</span>
+      <div class="seg">
+        <button class="seg-btn ${s.period === "all" ? "on" : ""}" data-p="all">За всё время</button>
+        <button class="seg-btn ${s.period === "month" ? "on" : ""}" data-p="month">Месяц</button>
+        <button class="seg-btn ${s.period === "week" ? "on" : ""}" data-p="week">Неделя</button>
+      </div>${monthSel}${weekSel}
+      <span class="filter-applied">Показано: <b>${esc(s.applied)}</b>${team ? ` · команда: <b>${esc(team)}</b>` : ""}</span>
+    </div>
+
+    <div class="stat-block">
+      <h2><span class="badge">1</span> Статистика по сеткам</h2>
+      <p class="desc">Учитывается по дате взятия в работу. Записей в выборке: ${s.net_total}.</p>
+      <div class="simple-card">${netList}</div>
+    </div>
+
+    <div class="stat-block">
+      <h2><span class="badge">2</span> Аккаунты</h2>
+      <p class="desc">Учитывается по дате смены статуса. Записей в выборке: ${s.acc_total}.</p>
+      <div class="simple-card">${accList}</div>
+    </div>`;
+
+  $("team-sel").onchange = (e) => { location.hash = linkWith({ team: e.target.value }); };
+  document.querySelectorAll(".seg-btn[data-p]").forEach((b) => b.onclick = () => {
+    const p = b.dataset.p;
+    if (p === "all") location.hash = linkWith({ period: "all", value: "" });
+    else {
+      $("month-sel").style.display = p === "month" ? "" : "none";
+      $("week-sel").style.display = p === "week" ? "" : "none";
+    }
+  });
+  if ($("month-sel")) $("month-sel").onchange = (e) => {
+    if (e.target.value) location.hash = linkWith({ period: "month", value: e.target.value });
+  };
+  if ($("week-sel")) $("week-sel").onchange = (e) => {
+    if (e.target.value) location.hash = linkWith({ period: "week", value: e.target.value });
+  };
 }
 
 // ---------- view: settings ----------
