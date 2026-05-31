@@ -412,3 +412,107 @@ html.theme-light .btn-long{background:#c0408a;color:#fff}
 .simple-vals b{color:var(--text);font-weight:700;font-family:"JetBrains Mono",monospace}
 a.seg-btn{text-decoration:none;display:inline-flex;align-items:center}
 .head-actions .seg{border:1px solid var(--line);border-radius:9px;overflow:hidden;display:inline-flex}
+
+/* ============================================================
+   МОБИЛЬНАЯ ВЁРСТКА — экраны до 768px
+   Бургер-меню, таблицы с горизонтальной прокруткой,
+   модалки во весь экран, фильтры в столбик, крупнее кнопки.
+   ============================================================ */
+.hamburger{display:none}
+
+@media (max-width: 768px) {
+  .content{padding:16px 12px 60px}
+
+  /* topbar: бургер + бренд + тема + выход; меню скрыто */
+  .topbar{padding:10px 12px;gap:10px;flex-wrap:nowrap}
+  .brand{font-size:14px}
+  .brand .logo{font-size:12px}
+  .hamburger{
+    display:inline-flex;align-items:center;justify-content:center;
+    width:38px;height:38px;border-radius:8px;border:1px solid var(--line);
+    background:transparent;color:var(--text);font-size:18px;cursor:pointer;
+    margin-left:auto;
+  }
+  .hamburger:hover{border-color:var(--accent);color:var(--accent)}
+  .theme-btn{width:38px;height:38px;margin:0}
+  .logout-btn{padding:6px 10px;font-size:12px}
+
+  /* меню вытаскивается сверху (скрыто по умолчанию) */
+  .tabs{
+    display:none;position:fixed;top:62px;left:0;right:0;z-index:55;
+    flex-direction:column;align-items:stretch;gap:0;padding:6px;
+    background:var(--panel);border-bottom:1px solid var(--line);
+    box-shadow:0 10px 24px rgba(0,0,0,.35);
+  }
+  body.nav-open .tabs{display:flex}
+  .tabs a, .tab-drop > a{
+    padding:14px 16px;border-radius:8px;font-size:15px;text-align:left;
+  }
+  .tab-drop{display:flex;flex-direction:column}
+  .tab-drop > a::after{content:""}
+  /* На мобильном выпадашка "На отправку" сразу разворачивается */
+  .tab-menu{
+    display:block;position:static;box-shadow:none;border:none;
+    background:transparent;padding:0 0 0 12px;margin:0;
+  }
+  .tab-menu a{padding:10px 14px;font-size:14px}
+
+  /* заголовки и фильтры */
+  .sec-head{flex-direction:column;align-items:stretch;gap:10px}
+  .sec-head h1{font-size:19px}
+  .head-actions{flex-wrap:wrap}
+  .head-actions .btn, .head-actions .btn-ghost{flex:1;min-width:0}
+  .filter-bar{padding:10px 12px;gap:8px}
+  .filter-bar > *{flex:1 1 calc(50% - 4px);min-width:0}
+  .search{width:auto}
+  .filter-sel{min-width:0;width:100%}
+  .filter-applied{flex-basis:100%;font-size:12px;margin-left:0;text-align:left}
+  .seg{flex:1 1 100%}
+  .seg-btn{flex:1;padding:10px 8px;font-size:12.5px}
+
+  /* таблицы: горизонтальный скролл */
+  .table-wrap{border-radius:8px}
+  table{font-size:12.5px}
+  thead th{padding:8px 9px;font-size:11px;letter-spacing:.3px}
+  tbody td{padding:8px 9px}
+  .records-table th:last-child,
+  .records-table td:last-child{padding:8px 6px}
+
+  /* модалки: во весь экран */
+  .modal-bg{padding:0;align-items:stretch}
+  .modal{
+    width:100%;min-height:100%;border-radius:0;padding:20px 16px 24px;
+    border:none;
+  }
+  .form-grid{grid-template-columns:1fr;gap:12px}
+
+  /* поля и кнопки крупнее, чтоб не промахиваться */
+  .field input, .field select, .filter-sel, .search, .bulk-area{font-size:15px}
+  .btn{padding:11px 16px;font-size:14px}
+  .btn-sm{padding:8px 12px;font-size:13px}
+  .row-actions .btn-sm{padding:8px 10px}
+
+  /* статистика: KPI и блоки */
+  .kpis{grid-template-columns:repeat(2,1fr);gap:10px}
+  .kpi{padding:14px 14px}
+  .kpi .value{font-size:24px}
+  .stat-block{margin-bottom:22px}
+  .stat-block h2{font-size:15px}
+
+  /* upcoming/sending — карточки заявок занимают всю ширину */
+  .req-grid{grid-template-columns:1fr;gap:12px}
+  .req-actions{flex-wrap:wrap}
+
+  /* справочники */
+  .ref-grid{grid-template-columns:1fr;gap:12px}
+
+  /* сортировка/модерация — действие на новой строке для тапаемости */
+  .row-actions{flex-wrap:wrap}
+}
+
+/* Очень маленькие телефоны */
+@media (max-width: 380px) {
+  .brand span:last-child{display:none}     /* короткий логотип */
+  .kpis{grid-template-columns:1fr}
+  .head-actions .seg-btn{font-size:12px;padding:8px 10px}
+}

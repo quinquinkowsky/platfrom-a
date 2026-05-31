@@ -721,24 +721,32 @@ async function viewStatsSimple(qs) {
     <option value="">— выберите неделю —</option>
     ${s.week_options.map((o) => `<option value="${esc(o.value)}" ${s.period === "week" && s.value === o.value ? "selected" : ""}>${esc(o.label)}</option>`).join("")}</select>`;
 
-  // блок 1 — по сеткам (по date_taken)
-  const NET_LABELS = { "Принят":"принято", "Выдан":"выдано", "Модерация":"модерация",
-    "Отказ":"отказ", "На стоп":"на стоп", "Правки":"правки" };
-  const netList = s.net_block.length ? s.net_block.map((row) => {
-    const parts = s.net_statuses.map((st) =>
-      `<span class="kv"><span class="k">${NET_LABELS[st] || st}:</span> <b>${row.counts[st]}</b></span>`
-    ).join(" · ");
-    return `<div class="simple-line"><div class="simple-src">${esc(row.source)}</div>
-      <div class="simple-vals">${parts}</div></div>`;
-  }).join("") : `<div class="empty">Нет данных за выбранный период</div>`;
+  // блок 1 — по сеткам (по date_taken) — табличка: строки=сетки, столбцы=статусы
+  const NET_LABELS = { "Принят":"Принято", "Выдан":"Выдано", "Модерация":"Модерация",
+    "Отказ":"Отказ", "На стоп":"На стоп", "Правки":"Правки" };
+  const netTable = s.net_block.length ? `
+    <div class="table-wrap"><table class="stats-table">
+      <thead><tr><th>Сетка</th>
+        ${s.net_statuses.map((st) => `<th>${esc(NET_LABELS[st] || st)}</th>`).join("")}
+        <th>Итого</th></tr></thead>
+      <tbody>${s.net_block.map((row) => `
+        <tr><td class="label-cell">${esc(row.source)}</td>
+        ${s.net_statuses.map((st) => `<td class="num">${cell(row.counts[st])}</td>`).join("")}
+        <td class="num tot-col">${row.total}</td></tr>`).join("")}
+      </tbody>
+    </table></div>` : `<div class="empty">Нет данных за выбранный период</div>`;
 
-  // блок 2 — аккаунты (по status_changed_at)
-  const accList = s.acc_block.length ? s.acc_block.map((row) =>
-    `<div class="simple-line"><div class="simple-src">${esc(row.source)}</div>
-      <div class="simple-vals">
-        <span class="kv"><span class="k">получено:</span> <b>${row.got}</b></span> · 
-        <span class="kv"><span class="k">ожидаем:</span> <b>${row.wait}</b></span>
-      </div></div>`).join("") : `<div class="empty">Нет данных за выбранный период</div>`;
+  // блок 2 — аккаунты (по status_changed_at) — табличка: сетки × получено/ожидаем
+  const accTable = s.acc_block.length ? `
+    <div class="table-wrap"><table class="stats-table">
+      <thead><tr><th>Сетка</th><th>Получено</th><th>Ожидаем</th><th>Итого</th></tr></thead>
+      <tbody>${s.acc_block.map((row) => `
+        <tr><td class="label-cell">${esc(row.source)}</td>
+        <td class="num">${cell(row.got)}</td>
+        <td class="num">${cell(row.wait)}</td>
+        <td class="num tot-col">${row.total}</td></tr>`).join("")}
+      </tbody>
+    </table></div>` : `<div class="empty">Нет данных за выбранный период</div>`;
 
   // выпадашка команд
   const teamOptions = `<option value="">Все команды</option>` +
@@ -768,13 +776,13 @@ async function viewStatsSimple(qs) {
     <div class="stat-block">
       <h2><span class="badge">1</span> Статистика по сеткам</h2>
       <p class="desc">Учитывается по дате взятия в работу. Записей в выборке: ${s.net_total}.</p>
-      <div class="simple-card">${netList}</div>
+      ${netTable}
     </div>
 
     <div class="stat-block">
       <h2><span class="badge">2</span> Аккаунты</h2>
       <p class="desc">Учитывается по дате смены статуса. Записей в выборке: ${s.acc_total}.</p>
-      <div class="simple-card">${accList}</div>
+      ${accTable}
     </div>`;
 
   $("team-sel").onchange = (e) => { location.hash = linkWith({ team: e.target.value }); };
@@ -878,5 +886,19 @@ $("theme-toggle").onclick = () => {
 };
 applyTheme();
 
-window.addEventListener("hashchange", route);
+// ---------- mobile hamburger ----------
+function closeMobileNav() { document.body.classList.remove("nav-open"); }
+$("hamburger").onclick = (e) => {
+  e.stopPropagation();
+  document.body.classList.toggle("nav-open");
+};
+// клик по ссылке навигации — закрываем меню
+document.addEventListener("click", (e) => {
+  const t = e.target;
+  if (t.tagName === "A" && t.closest("#nav")) closeMobileNav();
+  // клик вне меню (но не по самому меню и не по бургеру) — тоже закрываем
+  else if (document.body.classList.contains("nav-open")
+        && !t.closest("#nav") && t.id !== "hamburger") closeMobileNav();
+});
+window.addEventListener("hashchange", () => { closeMobileNav(); route(); });
 boot();
