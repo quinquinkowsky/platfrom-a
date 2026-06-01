@@ -1,0 +1,21 @@
+name = "domain-scanner-worker"
+main = "index.js"
+compatibility_date = "2025-05-01"
+
+# Триггеры:
+#   "0 *\/3 * * *" — каждые 3 часа: скачать CSV
+#   "* * * * *"    — каждую минуту: двигать активные задачи сканирования
+[triggers]
+crons = ["0 */3 * * *", "* * * * *"]
+
+# Переменные окружения задаются через дашборд Cloudflare → Worker →
+# Settings → Variables (или: wrangler secret put <NAME>). НЕ КЛАДИТЕ
+# секреты в этот файл.
+#
+# Нужны:
+#   SUPABASE_URL
+#   SUPABASE_SERVICE_KEY (secret)
+#   RAPIDAPI_KEY         (secret)
+#   VT_API_KEY           (secret)
+#   APP_PASS             (опционально — пароль для ручных /refresh и /tick)
+#   NAMECHEAP_CSV_URL    (опционально, если ссылка изменится)

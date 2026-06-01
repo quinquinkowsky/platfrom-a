@@ -73,6 +73,7 @@ function renderNav() {
       <div class="tab-menu">${sendMenu}</div></div>
     <a href="#/moderation" data-v="moderation">Модерация</a>
     <a href="#/expected" data-v="expected">Ожидаемое</a>
+    <a href="#/picker" data-v="picker">Подбор доменов</a>
     <a href="#/stats" data-v="stats">Статистика</a>
     <a href="#/settings" data-v="settings">Справочники</a>`;
 }
@@ -99,6 +100,7 @@ async function route() {
     else if (view === "sending") await viewSending(parts[1] || "0");
     else if (view === "moderation") await viewStatusQueue("moderation");
     else if (view === "expected") await viewStatusQueue("expected");
+    else if (view === "picker") await viewPicker(parts[1]);
     else if (view === "stats") await viewStats();
     else if (view === "settings") await viewSettings();
     else await viewRecords("domains");
@@ -603,6 +605,223 @@ async function viewStatusQueue(kind) {
       flash("Учтено: «На стоп» + копия отправлена в Сортировку"); route();
     } catch (err) { alert("Ошибка: " + err.message); }
   });
+}
+
+// ---------- view: Подбор доменов ----------
+async function viewPicker(jobId) {
+  // если указан id — показываем результаты задачи; иначе общий экран
+  if (jobId) return viewPickerJob(jobId);
+
+  const ov = await api("scan/overview");
+  const j = await api("scan/jobs");
+
+  const meta = ov.meta || {};
+  const last = meta.last_fetch_at ? new Date(meta.last_fetch_at).toLocaleString("ru-RU") : "—";
+  const lastOk = meta.last_fetch_ok;
+  const err = meta.last_error || "";
+
+  const statusPill = (st) => {
+    const cls = { pending: "pill-default", running: "pill-Модерация",
+      done: "pill-Принят", error: "pill-Отказ", cancelled: "pill-default" }[st] || "pill-default";
+    const label = { pending: "в очереди", running: "выполняется",
+      done: "готово", error: "ошибка", cancelled: "отменено" }[st] || st;
+    return `<span class="pill ${cls}">${label}</span>`;
+  };
+
+  const jobsRows = (j.jobs || []).map((job) => {
+    const greatN = (job.results_great || []).length;
+    const goodN = (job.results_good || []).length;
+    const flaggedN = (job.flagged || []).length;
+    const created = new Date(job.created_at).toLocaleString("ru-RU");
+    const prog = job.total ? `${job.progress}/${job.total}` : "—";
+    return `<tr>
+      <td class="mono dim">#${job.id}</td>
+      <td>${statusPill(job.status)} <span class="dim">${esc(job.step || "")}</span></td>
+      <td class="num">${job.want_great} / ${job.want_good}</td>
+      <td class="num">${greatN} / ${goodN}${flaggedN ? ` <span class="dim">(+${flaggedN} flagged)</span>` : ""}</td>
+      <td class="mono dim">${prog}</td>
+      <td class="mono dim">${created}</td>
+      <td>
+        <a class="btn btn-sm btn-ghost" href="#/picker/${job.id}">Открыть</a>
+        ${job.status === "pending" || job.status === "running"
+          ? `<button class="btn btn-sm btn-danger" data-cancel="${job.id}">Отменить</button>` : ""}
+      </td>
+    </tr>`;
+  }).join("");
+
+  $("view").innerHTML = `
+    <div class="sec-head">
+      <div><h1>Подбор доменов</h1>
+        <div class="sub">База обновляется автоматически каждые 3 часа. Сканирование выполняется в облаке партиями (несколько минут).</div></div>
+    </div>
+
+    <div class="kpis">
+      <div class="kpi"><div class="label">Доменов в базе</div>
+        <div class="value amber">${ov.auction_total || 0}</div></div>
+      <div class="kpi"><div class="label">В чёрном списке</div>
+        <div class="value">${ov.blacklist_total || 0}</div></div>
+      <div class="kpi"><div class="label">Последнее обновление</div>
+        <div class="value" style="font-size:14px;font-family:'Spline Sans'">${esc(last)}
+          ${lastOk === false ? `<div class="dim" style="color:var(--red);font-size:12px;margin-top:6px">${esc(err)}</div>` : ""}
+        </div></div>
+    </div>
+
+    <div class="stat-block">
+      <h2><span class="badge">1</span> Запустить новый подбор</h2>
+      <div class="filter-bar" style="flex-wrap:wrap;gap:10px">
+        <div class="field"><label>Сколько great</label>
+          <input type="number" id="p-great" value="2" min="0" max="50" style="width:80px"></div>
+        <div class="field"><label>Сколько good</label>
+          <input type="number" id="p-good" value="10" min="0" max="50" style="width:80px"></div>
+        <div class="field"><label>Часов до ауцк. (от)</label>
+          <input type="number" id="p-minh" value="3" min="0" style="width:80px"></div>
+        <div class="field"><label>Часов до ауцк. (до)</label>
+          <input type="number" id="p-maxh" value="24" min="1" style="width:80px"></div>
+        <div class="field"><label>Макс. цена ($)</label>
+          <input type="number" id="p-price" value="20" min="0" style="width:90px"></div>
+        <div class="field"><label>Мин. ScamDoc</label>
+          <input type="number" id="p-min-sd" value="70" min="0" max="100" style="width:80px"></div>
+        <div class="field"><label>Порог great</label>
+          <input type="number" id="p-max-sd" value="80" min="0" max="100" style="width:80px"></div>
+        <button class="btn" id="p-go">Запустить</button>
+      </div>
+    </div>
+
+    <div class="stat-block">
+      <h2><span class="badge">2</span> История задач</h2>
+      <div class="table-wrap">${jobsRows ? `<table>
+        <thead><tr><th>#</th><th>Статус</th><th>Цель great/good</th>
+          <th>Получено great/good</th><th>Прогресс</th><th>Создано</th><th></th></tr></thead>
+        <tbody>${jobsRows}</tbody></table>` : `<div class="empty">Задач пока нет</div>`}</div>
+    </div>`;
+
+  $("p-go").onclick = async () => {
+    const body = {
+      want_great: parseInt($("p-great").value, 10) || 0,
+      want_good: parseInt($("p-good").value, 10) || 0,
+      min_hours: parseInt($("p-minh").value, 10) || 3,
+      max_hours: parseInt($("p-maxh").value, 10) || 24,
+      max_price: parseFloat($("p-price").value) || 0,
+      min_sd_score: parseInt($("p-min-sd").value, 10) || 70,
+      max_sd_score: parseInt($("p-max-sd").value, 10) || 80,
+    };
+    try {
+      const r = await api("scan/start", { method: "POST", body });
+      flash("Задача создана. Будет выполнена в течение нескольких минут.");
+      location.hash = `#/picker/${r.job.id}`;
+    } catch (e) { alert("Ошибка: " + e.message); }
+  };
+  document.querySelectorAll("[data-cancel]").forEach((b) => b.onclick = async () => {
+    if (!confirm("Отменить задачу?")) return;
+    await api("scan/cancel", { method: "POST", body: { id: b.dataset.cancel } });
+    flash("Отменено"); route();
+  });
+}
+
+async function viewPickerJob(jobId) {
+  const r = await api("scan/job?id=" + encodeURIComponent(jobId));
+  const job = r.job;
+  if (!job) { $("view").innerHTML = `<div class="empty">Задача не найдена</div>`; return; }
+
+  const renderTable = (rows, kind) => {
+    if (!rows.length) return `<div class="empty">Пока пусто</div>`;
+    return `<table>
+      <thead><tr><th>Домен</th><th>ScamDoc</th><th>Часов</th><th>Цена</th>
+        <th>Ставки</th><th>Рег.</th><th>DR</th><th>VT</th><th></th></tr></thead>
+      <tbody>${rows.map((d) => {
+        const sc = d.scamdoc_score || 0;
+        const cls = sc >= 80 ? "pill-Принят" : "pill-Правки";
+        const vtOk = (d.vt_malicious || 0) === 0;
+        return `<tr>
+          <td class="mono">${esc(d.domain)} ${d.url ? `<a class="dim" target="_blank" rel="noopener" href="${esc(d.url)}">↗</a>` : ""}</td>
+          <td><span class="pill ${cls}">${sc}%</span></td>
+          <td class="mono">${d.hours_left ?? "—"}h</td>
+          <td class="mono">${d.price > 0 ? "$" + d.price : "—"}</td>
+          <td class="num">${d.bid_count || 0}</td>
+          <td class="mono dim">${esc(d.reg_date || "")}</td>
+          <td class="num">${d.ahrefs_dr ? Math.round(d.ahrefs_dr) : "—"}</td>
+          <td class="${vtOk ? "" : "dim"}" style="color:${vtOk ? "var(--green)" : "var(--red)"}">${vtOk ? "clean" : `${d.vt_malicious} flags`}</td>
+          <td><button class="btn btn-sm" data-accept='${esc(JSON.stringify(d))}'>Принять</button></td>
+        </tr>`;
+      }).join("")}</tbody></table>`;
+  };
+
+  const logs = (job.logs || []).slice(-50).map((l) =>
+    `<div class="log-line"><span class="log-time">${esc(l.time || "")}</span> ${esc(l.msg)}</div>`
+  ).join("");
+
+  const progressPct = job.total > 0 ? Math.round((job.progress / job.total) * 100) : 0;
+  const stepLabel = { scamdoc: "ScamDoc", virustotal: "VirusTotal", done: "Готово" }[job.step] || job.step || "—";
+
+  $("view").innerHTML = `
+    <div class="sec-head">
+      <div><h1>Задача #${job.id}</h1>
+        <div class="sub">Цель: ${job.want_great} great + ${job.want_good} good · Окно: ${job.min_hours}-${job.max_hours}ч · Макс. цена: $${job.max_price}</div></div>
+      <div class="head-actions">
+        <a class="btn btn-ghost" href="#/picker">← К списку</a>
+        ${(job.results_great || []).length || (job.results_good || []).length
+          ? `<button class="btn" id="accept-all">Принять все</button>` : ""}
+      </div>
+    </div>
+
+    <div class="stat-block">
+      <h2>Прогресс — ${esc(stepLabel)}</h2>
+      <div class="progress-row">
+        <div class="progress-bar"><div class="progress-fill" style="width:${progressPct}%"></div></div>
+        <div class="dim mono">${job.progress}/${job.total} · ${progressPct}%</div>
+      </div>
+      ${job.status !== "done" && job.status !== "error" && job.status !== "cancelled"
+        ? `<div class="dim" style="margin-top:6px">Страница обновляется автоматически каждые 5 секунд.</div>` : ""}
+      ${job.error_msg ? `<div class="flash flash-err" style="margin-top:10px">${esc(job.error_msg)}</div>` : ""}
+    </div>
+
+    <div class="stat-block">
+      <h2><span class="badge">G</span> Great</h2>
+      <div class="table-wrap">${renderTable(job.results_great || [], "great")}</div>
+    </div>
+    <div class="stat-block">
+      <h2><span class="badge">g</span> Good</h2>
+      <div class="table-wrap">${renderTable(job.results_good || [], "good")}</div>
+    </div>
+    ${(job.flagged || []).length ? `<div class="stat-block">
+      <h2><span class="badge" style="background:var(--red)">!</span> Flagged (VirusTotal)</h2>
+      <div class="table-wrap">${renderTable(job.flagged, "flagged")}</div>
+    </div>` : ""}
+
+    <div class="stat-block">
+      <h2>Лог</h2>
+      <div class="console-box">${logs || `<div class="dim">пусто</div>`}</div>
+    </div>`;
+
+  document.querySelectorAll("[data-accept]").forEach((b) => b.onclick = async () => {
+    const item = JSON.parse(b.dataset.accept);
+    if (!confirm(`Принять «${item.domain}»? Будет добавлен в чёрный список и создан в «Домены» со статусом «На сортировку».`)) return;
+    try {
+      await api("scan/accept", { method: "POST", body: { item } });
+      flash("Принят: добавлен в Домены/Сортировку");
+      b.closest("tr").style.opacity = "0.4";
+      b.disabled = true;
+      b.textContent = "✓ принят";
+    } catch (e) { alert("Ошибка: " + e.message); }
+  });
+  const aa = $("accept-all");
+  if (aa) aa.onclick = async () => {
+    const items = [...(job.results_great || []), ...(job.results_good || [])];
+    if (!items.length) return;
+    if (!confirm(`Принять все ${items.length} доменов?`)) return;
+    try {
+      const r = await api("scan/accept_all", { method: "POST", body: { items } });
+      flash(`Принято: ${r.added}`);
+      route();
+    } catch (e) { alert("Ошибка: " + e.message); }
+  };
+
+  // авто-обновление, пока задача не завершилась
+  if (job.status === "pending" || job.status === "running") {
+    setTimeout(() => {
+      if (location.hash.startsWith(`#/picker/${jobId}`)) route();
+    }, 5000);
+  }
 }
 
 // ---------- view: stats ----------

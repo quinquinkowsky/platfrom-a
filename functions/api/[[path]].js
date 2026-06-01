@@ -14,6 +14,15 @@ const LIST_FILTERS = ["geo","team","taker","source","status"];
 const enc = (v) => encodeURIComponent(v);
 const today = () => new Date().toISOString().slice(0, 10);
 
+// перевод ScamDoc-балла в наш справочник рейтинга
+function scoreToRating(score) {
+  const s = parseInt(score, 10);
+  if (!isFinite(s)) return "";
+  if (s >= 80) return "80+";
+  if (s >= 60) return "60-79";
+  return "0";
+}
+
 function cleanRecord(body) {
   const r = {};
   for (const f of FIELDS) r[f] = (body[f] ?? "").toString().trim();
@@ -307,6 +316,131 @@ export async function onRequest(context) {
       const value = url.searchParams.get("value") || "";
       const team = url.searchParams.get("team") || "";
       return json(await computeSimpleStats(db, period, value, team));
+    }
+
+    // ---- SCANNER ----
+    // Сводка по аукционной базе
+    if (path === "scan/overview" && method === "GET") {
+      const meta = await db.select("auction_meta", "id=eq.1");
+      const cnt = await db.select("auction_domains", "select=id&limit=1");
+      const allCount = await fetch(`${env.SUPABASE_URL.replace(/\/+$/,"")}/rest/v1/auction_domains?select=count`,
+        { headers: { apikey: env.SUPABASE_SERVICE_KEY,
+                     Authorization: "Bearer " + env.SUPABASE_SERVICE_KEY,
+                     Prefer: "count=exact" } });
+      const cntHeader = allCount.headers.get("Content-Range") || "*/0";
+      const auction_total = parseInt(cntHeader.split("/").pop(), 10) || 0;
+      const blRes = await fetch(`${env.SUPABASE_URL.replace(/\/+$/,"")}/rest/v1/domain_blacklist?select=count`,
+        { headers: { apikey: env.SUPABASE_SERVICE_KEY,
+                     Authorization: "Bearer " + env.SUPABASE_SERVICE_KEY,
+                     Prefer: "count=exact" } });
+      const blHeader = blRes.headers.get("Content-Range") || "*/0";
+      const blacklist_total = parseInt(blHeader.split("/").pop(), 10) || 0;
+      return json({
+        meta: (meta && meta[0]) || null,
+        auction_total, blacklist_total,
+      });
+    }
+
+    // Создать задачу подбора
+    if (path === "scan/start" && method === "POST") {
+      const want_good = Math.max(0, parseInt(body.want_good, 10) || 0);
+      const want_great = Math.max(0, parseInt(body.want_great, 10) || 0);
+      if (want_good + want_great === 0)
+        return json({ error: "Укажите want_good или want_great" }, 400);
+      const ins = await db.insert("scan_jobs", [{
+        status: "pending",
+        want_good, want_great,
+        min_hours: Math.max(0, parseInt(body.min_hours, 10) || 3),
+        max_hours: Math.max(1, parseInt(body.max_hours, 10) || 24),
+        max_price: Math.max(0, parseFloat(body.max_price) || 0),
+        min_sd_score: Math.max(0, Math.min(100, parseInt(body.min_sd_score, 10) || 70)),
+        max_sd_score: Math.max(0, Math.min(100, parseInt(body.max_sd_score, 10) || 80)),
+      }]);
+      return json({ ok: true, job: ins[0] });
+    }
+
+    // Список задач
+    if (path === "scan/jobs" && method === "GET") {
+      const rows = await db.select("scan_jobs",
+        "order=created_at.desc&limit=20");
+      return json({ jobs: rows });
+    }
+
+    // Одна задача (для опроса)
+    if (path === "scan/job" && method === "GET") {
+      const id = url.searchParams.get("id");
+      if (!id) return json({ error: "id" }, 400);
+      const rows = await db.select("scan_jobs", `id=eq.${enc(id)}`);
+      return json({ job: rows[0] || null });
+    }
+
+    // Отмена задачи
+    if (path === "scan/cancel" && method === "POST") {
+      await db.update("scan_jobs", `id=eq.${enc(body.id)}`,
+        { status: "cancelled" });
+      return json({ ok: true });
+    }
+
+    // Принять домен из подборки:
+    //   1) добавить в чёрный список (никогда больше не показывать)
+    //   2) создать запись в records (раздел domains) со статусом «На сортировку»
+    //      и копией всех известных полей — чтобы домен ушёл в обычный поток
+    if (path === "scan/accept" && method === "POST") {
+      const item = body.item || {};
+      const domain = (item.domain || "").trim();
+      if (!domain) return json({ error: "domain" }, 400);
+      // 1) blacklist (с защитой от дубля)
+      try {
+        await db.insert("domain_blacklist", [{ domain, reason: "picked" }]);
+      } catch (e) {
+        // если уже есть — игнорируем
+      }
+      // 2) запись в records
+      const now = new Date().toISOString();
+      const rec = {
+        section: "domains",
+        domain,
+        rating: scoreToRating(item.scamdoc_score),
+        comment: item.url || "",
+        date_taken: now.slice(0, 10),
+        status: "На сортировку",
+        status_changed_at: now.slice(0, 10),
+      };
+      await db.insert("records", [rec]);
+      return json({ ok: true });
+    }
+
+    // Принять все: батч
+    if (path === "scan/accept_all" && method === "POST") {
+      const items = Array.isArray(body.items) ? body.items : [];
+      let added = 0;
+      for (const item of items) {
+        const domain = (item.domain || "").trim();
+        if (!domain) continue;
+        try { await db.insert("domain_blacklist", [{ domain, reason: "picked" }]); }
+        catch (e) {}
+        const now = new Date().toISOString();
+        await db.insert("records", [{
+          section: "domains", domain,
+          rating: scoreToRating(item.scamdoc_score),
+          comment: item.url || "",
+          date_taken: now.slice(0, 10),
+          status: "На сортировку",
+          status_changed_at: now.slice(0, 10),
+        }]);
+        added++;
+      }
+      return json({ ok: true, added });
+    }
+
+    // Просто отправить в чёрный список без записи в records
+    // (например, если пользователь решил «не брать»)
+    if (path === "scan/dismiss" && method === "POST") {
+      const domain = (body.domain || "").trim();
+      if (!domain) return json({ error: "domain" }, 400);
+      try { await db.insert("domain_blacklist", [{ domain, reason: "manual" }]); }
+      catch (e) {}
+      return json({ ok: true });
     }
 
     return json({ error: "not found", path }, 404);
