@@ -1401,7 +1401,7 @@ function openTgModal(sellerId) {
     </div>` : `<div class="dim">все команды уже настроены</div>`;
 
   const modalHtml = `
-    <div class="modal-bg" id="tg-modal-bg">
+    <div class="modal-bg show" id="tg-modal-bg">
       <div class="modal modal-wide">
         <div class="modal-head">
           <h2>Telegram — ${esc(seller.name)}</h2>
