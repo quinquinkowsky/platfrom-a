@@ -414,6 +414,7 @@ async function viewSorting() {
       <td><select class="filter-sel" data-seller="${r.id}" data-prev="${esc(prev)}">
         <option value="">— выбрать селлера —</option>${opts}</select></td>
       <td><input class="email-input" data-email="${r.id}" value="${esc(r.comment || "")}" placeholder="почта"></td>
+      <td><input class="email-input" data-adtype="${r.id}" value="${esc(r.ad_type || "")}" placeholder="type of ads"></td>
       <td>${r.seller ? `<span class="pill pill-Принят">✓ готово</span>` : `<span class="dim">ожидает</span>`}</td>
     </tr>`;
   }).join("");
@@ -439,7 +440,7 @@ async function viewSorting() {
       <span class="filter-applied">Показано: <b>${rows.length}</b> из <b>${allRows.length}</b></span>
     </div>
     <div class="table-wrap">${rows.length ? `<table>
-      <thead><tr><th>Домен</th><th>ГЕО</th><th>Команда</th><th>Сетка</th><th>Кто взял</th><th>Был у</th><th>Селлер</th><th>Почта</th><th></th></tr></thead>
+      <thead><tr><th>Домен</th><th>ГЕО</th><th>Команда</th><th>Сетка</th><th>Кто взял</th><th>Был у</th><th>Селлер</th><th>Почта</th><th>Type of ADS</th><th></th></tr></thead>
       <tbody>${body}</tbody></table>` : `<div class="empty">Нет доменов под фильтр.</div>`}</div>`;
 
   // фильтр по сетке — переход по ссылке
@@ -461,25 +462,28 @@ async function viewSorting() {
       flash("Селлер указан и перенесён в Домены/Б-У"); route();
     });
 
-  // инлайн-сохранение почты при blur / Enter
-  const saveEmail = async (inp) => {
-    const id = inp.dataset.email;
+  // инлайн-сохранение почты / Type of ADS при blur / Enter
+  const inlineSave = async (inp, apiPath, fieldKey, datasetKey) => {
     if (inp.dataset.last === inp.value) return;
     try {
-      await api("record/set_email", { method: "POST",
-        body: { id, email: inp.value } });
+      await api(apiPath, { method: "POST",
+        body: { id: inp.dataset[datasetKey], [fieldKey]: inp.value } });
       inp.dataset.last = inp.value;
       inp.classList.add("saved");
       setTimeout(() => inp.classList.remove("saved"), 800);
     } catch (e) { alert("Ошибка: " + e.message); }
   };
-  document.querySelectorAll("[data-email]").forEach((inp) => {
-    inp.dataset.last = inp.value;
-    inp.addEventListener("blur", () => saveEmail(inp));
-    inp.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") { e.preventDefault(); inp.blur(); }
+  const wireInline = (selector, apiPath, fieldKey, datasetKey) => {
+    document.querySelectorAll(selector).forEach((inp) => {
+      inp.dataset.last = inp.value;
+      inp.addEventListener("blur", () => inlineSave(inp, apiPath, fieldKey, datasetKey));
+      inp.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); inp.blur(); }
+      });
     });
-  });
+  };
+  wireInline("[data-email]",  "record/set_email",   "email",   "email");
+  wireInline("[data-adtype]", "record/set_ad_type", "ad_type", "adtype");
 }
 
 // ---------- view: sending ----------
@@ -526,10 +530,11 @@ async function viewSending(key) {
             data-seller="${esc(g.seller)}" data-count="${g.count}" data-key="${idx}">✓ Отправлено</button>
         </div>
       </div>
-      <table class="req-table"><thead><tr><th>ГЕО</th><th>Домен</th><th>Почта</th></tr></thead>
+      <table class="req-table"><thead><tr><th>ГЕО</th><th>Домен</th><th>Почта</th><th>Type of ADS</th></tr></thead>
         <tbody>${g.items.map((it) =>
           `<tr><td>${esc(it.geo)}</td><td class="mono">${esc(it.domain)}</td>
             <td><input class="email-input" data-email="${it.id}" value="${esc(it.email || "")}" placeholder="почта"></td>
+            <td><input class="email-input" data-adtype="${it.id}" value="${esc(it.ad_type || "")}" placeholder="type of ads"></td>
           </tr>`).join("")}</tbody>
       </table></div>`;
   }).join("");
@@ -599,24 +604,28 @@ async function viewSending(key) {
       route();
     } catch (e) { alert("Ошибка: " + e.message); allBtn.disabled = false; }
   };
-  // инлайн-сохранение почты в каждой строке таблицы заявки
-  document.querySelectorAll(".req-card [data-email]").forEach((inp) => {
-    inp.dataset.last = inp.value;
-    const save = async () => {
-      if (inp.dataset.last === inp.value) return;
-      try {
-        await api("record/set_email", { method: "POST",
-          body: { id: inp.dataset.email, email: inp.value } });
-        inp.dataset.last = inp.value;
-        inp.classList.add("saved");
-        setTimeout(() => inp.classList.remove("saved"), 800);
-      } catch (e) { alert("Ошибка: " + e.message); }
-    };
-    inp.addEventListener("blur", save);
-    inp.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") { e.preventDefault(); inp.blur(); }
+  // инлайн-сохранение почты / Type of ADS в строках таблицы заявки
+  const sendingInline = (selector, apiPath, fieldKey, datasetKey) => {
+    document.querySelectorAll(`.req-card ${selector}`).forEach((inp) => {
+      inp.dataset.last = inp.value;
+      const save = async () => {
+        if (inp.dataset.last === inp.value) return;
+        try {
+          await api(apiPath, { method: "POST",
+            body: { id: inp.dataset[datasetKey], [fieldKey]: inp.value } });
+          inp.dataset.last = inp.value;
+          inp.classList.add("saved");
+          setTimeout(() => inp.classList.remove("saved"), 800);
+        } catch (e) { alert("Ошибка: " + e.message); }
+      };
+      inp.addEventListener("blur", save);
+      inp.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); inp.blur(); }
+      });
     });
-  });
+  };
+  sendingInline("[data-email]",  "record/set_email",   "email",   "email");
+  sendingInline("[data-adtype]", "record/set_ad_type", "ad_type", "adtype");
 }
 function fallbackCopy(text, done) {
   const ta = document.createElement("textarea");
@@ -1225,8 +1234,10 @@ async function viewSettings() {
             <div class="tg-override-edit hidden" id="ov-edit-${o.id}">
               <label>chat_id <span class="hint">(пусто → берётся базовый селлера)</span></label>
               <input id="ov-chat-${o.id}" value="${esc(o.chat_id || "")}" placeholder="базовый">
-              <label>Шаблон <span class="hint">пусто → базовый. Доступно: {source}</span></label>
+              <label>Шаблон сообщения <span class="hint">пусто → базовый</span></label>
               <textarea id="ov-tmpl-${o.id}" rows="5" class="tg-tmpl">${esc(o.message_template || "")}</textarea>
+              <label>Шаблон одного домена <span class="hint">пусто → базовый</span></label>
+              <textarea id="ov-dtmpl-${o.id}" rows="5" class="tg-tmpl">${esc(o.domain_template || "")}</textarea>
               <div class="tg-foot">
                 <button class="btn btn-sm" data-ov-save="${o.id}" data-seller-id="${it.id}" data-ov-src-value="${esc(o.source)}">Сохранить</button>
               </div>
@@ -1252,6 +1263,8 @@ async function viewSettings() {
             <input id="tg-chat-${it.id}" value="${esc(it.chat_id || "")}" placeholder="-1001234567890">
             <label>Шаблон сообщения <span class="hint">{seller} {source} {count} {date} {domains}</span></label>
             <textarea id="tg-tmpl-${it.id}" rows="5" class="tg-tmpl">${esc(it.message_template || "{seller}\n{domains}")}</textarea>
+            <label>Шаблон одного домена <span class="hint">пусто → старый формат «сетка / гео / домен / почта». Доступно: {domain} {geo} {source} {email} {ad_type}</span></label>
+            <textarea id="tg-dtmpl-${it.id}" rows="5" class="tg-tmpl" placeholder="Domain URL: {domain}&#10;GEO: {geo}&#10;Time Zone: UTC+3&#10;Type of ADS: {ad_type}">${esc(it.domain_template || "")}</textarea>
             <div class="tg-foot">
               <button class="btn btn-sm" data-tg-save="${it.id}">Сохранить базовые</button>
               <button class="btn btn-sm btn-ghost" data-tg-cancel="${it.id}">Закрыть</button>
@@ -1315,9 +1328,11 @@ async function viewSettings() {
     const id = b.dataset.tgSave;
     const chatId = $("tg-chat-" + id).value.trim();
     const tmpl = $("tg-tmpl-" + id).value;
+    const dtmpl = $("tg-dtmpl-" + id).value;
     try {
       await api("ref", { method: "POST", body: {
-        action: "update_tg", table: "sellers", id, chat_id: chatId, message_template: tmpl,
+        action: "update_tg", table: "sellers", id,
+        chat_id: chatId, message_template: tmpl, domain_template: dtmpl,
       }});
       flash("Telegram-настройки сохранены"); route();
     } catch (e) { alert(e.message); }
@@ -1332,10 +1347,12 @@ async function viewSettings() {
     const source = b.dataset.ovSrcValue;
     const chatId = $("ov-chat-" + ovId).value.trim();
     const tmpl = $("ov-tmpl-" + ovId).value;
+    const dtmpl = $("ov-dtmpl-" + ovId).value;
     try {
       await api("ref", { method: "POST", body: {
         action: "update_tg_override", table: "sellers",
-        seller_id: sellerId, source, chat_id: chatId, message_template: tmpl,
+        seller_id: sellerId, source,
+        chat_id: chatId, message_template: tmpl, domain_template: dtmpl,
       }});
       flash(`Переопределение «${source}» сохранено`); route();
     } catch (e) { alert(e.message); }
@@ -1358,7 +1375,8 @@ async function viewSettings() {
       // создаём пустое переопределение — пользователь раскроет и заполнит
       await api("ref", { method: "POST", body: {
         action: "update_tg_override", table: "sellers",
-        seller_id: sellerId, source, chat_id: "", message_template: "",
+        seller_id: sellerId, source,
+        chat_id: "", message_template: "", domain_template: "",
       }});
       flash(`Добавлено переопределение «${source}»`); route();
     } catch (e) { alert(e.message); }

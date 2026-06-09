@@ -78,14 +78,14 @@ export async function onRequest(context) {
           out.members = await db.select("members", "select=id,name,team&order=name.asc");
         } else if (t === "sellers") {
           out.sellers = await db.select("sellers",
-            "select=id,name,chat_id,message_template&order=name.asc");
+            "select=id,name,chat_id,message_template,domain_template&order=name.asc");
         } else {
           out[t] = await db.select(t, "select=id,name&order=name.asc");
         }
       }
       // подтягиваем переопределения по парам «селлер + сетка»
       const overrides = await db.select("seller_source_telegram",
-        "select=id,seller_id,source,chat_id,message_template&order=source.asc");
+        "select=id,seller_id,source,chat_id,message_template,domain_template&order=source.asc");
       const bySeller = {};
       for (const o of overrides) {
         if (!bySeller[o.seller_id]) bySeller[o.seller_id] = [];
@@ -119,6 +119,7 @@ export async function onRequest(context) {
         const patch = {};
         if ("chat_id" in body) patch.chat_id = (body.chat_id || "").trim();
         if ("message_template" in body) patch.message_template = body.message_template || "";
+        if ("domain_template" in body) patch.domain_template = body.domain_template || "";
         await db.update("sellers", `id=eq.${enc(body.id)}`, patch);
         return json({ ok: true });
       }
@@ -132,6 +133,7 @@ export async function onRequest(context) {
           seller_id: sellerId, source,
           chat_id: (body.chat_id || "").trim(),
           message_template: body.message_template || "",
+          domain_template: body.domain_template || "",
         };
         // upsert по (seller_id, source) — UNIQUE
         try {
@@ -141,7 +143,8 @@ export async function onRequest(context) {
           if (existing.length) {
             await db.update("seller_source_telegram",
               `id=eq.${enc(existing[0].id)}`,
-              { chat_id: row.chat_id, message_template: row.message_template });
+              { chat_id: row.chat_id, message_template: row.message_template,
+                domain_template: row.domain_template });
           } else {
             await db.insert("seller_source_telegram", [row]);
           }
@@ -335,6 +338,13 @@ export async function onRequest(context) {
         { comment: (body.email || "").trim() });
       return json({ ok: true });
     }
+    // Установить «Type of ADS» для одного домена. То же поведение, что и почта.
+    if (path === "record/set_ad_type" && method === "POST") {
+      if (!body.id) return json({ error: "id обязателен" }, 400);
+      await db.update("records", `id=eq.${enc(body.id)}`,
+        { ad_type: (body.ad_type || "").trim() });
+      return json({ ok: true });
+    }
 
     // ---- SENDING ----
     if (path === "sending" && method === "GET") {
@@ -352,7 +362,7 @@ export async function onRequest(context) {
         if (!groups[key]) { groups[key] = { seller: r.seller, source: r.source || "", items: [] };
           order.push(key); }
         groups[key].items.push({ id: r.id, source: r.source, geo: r.geo,
-          domain: r.domain, email: r.comment || "" });
+          domain: r.domain, email: r.comment || "", ad_type: r.ad_type || "" });
       }
       // Строка в формате «сетка / гео / домен» — почта добавляется только если задана.
       const fmtLine = (it) => `${it.source} / ${it.geo} / ${it.domain}` +
@@ -784,24 +794,27 @@ async function sendOneRequest(db, env, sellerName, source, ids) {
 
   // тянем базовые настройки селлера + его id
   const sellers = await db.select("sellers",
-    `name=eq.${enc(sellerName)}&select=id,chat_id,message_template`);
+    `name=eq.${enc(sellerName)}&select=id,chat_id,message_template,domain_template`);
   const seller = sellers[0];
   if (!seller) return { ok: false, error: `Селлер «${sellerName}» не найден` };
 
   // ищем переопределение для пары (seller_id, source)
   let chatId = (seller.chat_id || "").trim();
   let tmpl = (seller.message_template || "").trim() || "{seller}\n{domains}";
+  let domainTmpl = (seller.domain_template || "").trim();
   let usedOverride = false;
   if (source) {
     const ovs = await db.select("seller_source_telegram",
       `seller_id=eq.${enc(seller.id)}&source=eq.${enc(source)}` +
-      `&select=chat_id,message_template`);
+      `&select=chat_id,message_template,domain_template`);
     const ov = ovs[0];
     if (ov) {
       // chat_id — переопределяем только если в override он явно задан
       if ((ov.chat_id || "").trim()) chatId = ov.chat_id.trim();
-      // template — то же самое, не пустой
+      // message_template — переопределяем только если непустой
       if ((ov.message_template || "").trim()) tmpl = ov.message_template;
+      // domain_template — то же самое
+      if ((ov.domain_template || "").trim()) domainTmpl = ov.domain_template;
       usedOverride = true;
     }
   }
@@ -815,15 +828,29 @@ async function sendOneRequest(db, env, sellerName, source, ids) {
     `id=in.(${inList})&order=source.asc,domain.asc`);
   if (!rows.length) return { ok: false, error: "Записи не найдены" };
 
-  // строим многострочный блок доменов «сетка / гео / домен [/ почта]»
-  const domainsBlock = rows.map((r) => {
-    const base = `${r.source || ""} / ${r.geo || ""} / ${r.domain}`;
-    const email = (r.comment || "").trim();
-    return email ? `${base} / ${email}` : base;
-  }).join("\n");
+  // строим блок доменов:
+  // (1) если у пары задан domain_template — раскрываем его по каждой строке
+  //     (подстановки {domain} {geo} {source} {email} {ad_type}), склеиваем через \n\n.
+  // (2) если нет — старый одностроковый формат «сетка / гео / домен [/ почта]».
+  let domainsBlock;
+  if (domainTmpl) {
+    domainsBlock = rows.map((r) => domainTmpl
+      .replaceAll("{domain}",  r.domain || "")
+      .replaceAll("{geo}",     r.geo || "")
+      .replaceAll("{source}",  r.source || "")
+      .replaceAll("{email}",   (r.comment || "").trim())
+      .replaceAll("{ad_type}", (r.ad_type || "").trim())
+    ).join("\n\n");
+  } else {
+    domainsBlock = rows.map((r) => {
+      const base = `${r.source || ""} / ${r.geo || ""} / ${r.domain}`;
+      const email = (r.comment || "").trim();
+      return email ? `${base} / ${email}` : base;
+    }).join("\n");
+  }
   const todayStr = new Date().toLocaleDateString("ru-RU");
 
-  // подстановки. {source} тоже доступен.
+  // подстановки в основном шаблоне. {source} тоже доступен.
   let text = tmpl
     .replaceAll("{seller}", sellerName)
     .replaceAll("{source}", source || "")
