@@ -83,9 +83,9 @@ export async function onRequest(context) {
           out[t] = await db.select(t, "select=id,name&order=name.asc");
         }
       }
-      // подтягиваем переопределения по парам «селлер + сетка»
-      const overrides = await db.select("seller_source_telegram",
-        "select=id,seller_id,source,chat_id,message_template,domain_template&order=source.asc");
+      // подтягиваем переопределения по тройке (селлер, команда, сетка)
+      const overrides = await db.select("seller_overrides",
+        "select=id,seller_id,team,source,chat_id,message_template,domain_template&order=team.asc,source.asc");
       const bySeller = {};
       for (const o of overrides) {
         if (!bySeller[o.seller_id]) bySeller[o.seller_id] = [];
@@ -123,30 +123,30 @@ export async function onRequest(context) {
         await db.update("sellers", `id=eq.${enc(body.id)}`, patch);
         return json({ ok: true });
       }
-      // создание / обновление переопределения «селлер + сетка»
+      // создание / обновление переопределения по тройке (селлер, команда, сетка)
+      // team обязателен; source может быть пустым (тогда это override «по команде»).
       if (action === "update_tg_override" && table === "sellers") {
         const sellerId = body.seller_id;
+        const team = (body.team || "").trim();
         const source = (body.source || "").trim();
-        if (!sellerId || !source)
-          return json({ error: "seller_id и source обязательны" }, 400);
+        if (!sellerId || !team)
+          return json({ error: "seller_id и team обязательны" }, 400);
         const row = {
-          seller_id: sellerId, source,
+          seller_id: sellerId, team, source,
           chat_id: (body.chat_id || "").trim(),
           message_template: body.message_template || "",
           domain_template: body.domain_template || "",
         };
-        // upsert по (seller_id, source) — UNIQUE
         try {
-          // пробуем найти существующее переопределение
-          const existing = await db.select("seller_source_telegram",
-            `seller_id=eq.${enc(sellerId)}&source=eq.${enc(source)}`);
+          const existing = await db.select("seller_overrides",
+            `seller_id=eq.${enc(sellerId)}&team=eq.${enc(team)}&source=eq.${enc(source)}`);
           if (existing.length) {
-            await db.update("seller_source_telegram",
+            await db.update("seller_overrides",
               `id=eq.${enc(existing[0].id)}`,
               { chat_id: row.chat_id, message_template: row.message_template,
                 domain_template: row.domain_template });
           } else {
-            await db.insert("seller_source_telegram", [row]);
+            await db.insert("seller_overrides", [row]);
           }
         } catch (e) {
           return json({ error: String(e.message || e) }, 500);
@@ -154,7 +154,7 @@ export async function onRequest(context) {
         return json({ ok: true });
       }
       if (action === "delete_tg_override" && table === "sellers") {
-        await db.remove("seller_source_telegram", `id=eq.${enc(body.id)}`);
+        await db.remove("seller_overrides", `id=eq.${enc(body.id)}`);
         return json({ ok: true });
       }
       return json({ error: "bad action" }, 400);
@@ -163,30 +163,57 @@ export async function onRequest(context) {
     // ---- RECORDS ----
     if (path === "records" && method === "GET") {
       const section = url.searchParams.get("section") || "domains";
-      let q = `section=eq.${enc(section)}&order=id.desc`;
+      const PAGE_SIZE = 250;
+      const page = Math.max(0, parseInt(url.searchParams.get("page"), 10) || 0);
+      const offset = page * PAGE_SIZE;
+
+      // section=all → не фильтруем (Сводный лист)
+      const parts = [];
+      if (section !== "all") parts.push(`section=eq.${enc(section)}`);
       for (const f of LIST_FILTERS) {
         const v = url.searchParams.get(f);
-        if (v) q += `&${f}=eq.${enc(v)}`;
+        if (v) parts.push(`${f}=eq.${enc(v)}`);
       }
-      let rows = await db.select("records", q);
-      const term = (url.searchParams.get("q") || "").trim().toLowerCase();
-      if (term) {
-        rows = rows.filter((r) =>
-          ["domain","seller","source","team","taker","status"]
-            .some((k) => (r[k] || "").toLowerCase().includes(term)));
-      }
-      // фильтр «занят/свободен» по полю taker (кто взял в работу)
+      // фильтр «занят/свободен»: taker пустой/непустой
       const avail = url.searchParams.get("avail") || "";
-      if (avail === "busy") rows = rows.filter((r) => (r.taker || "").trim() !== "");
-      else if (avail === "free") rows = rows.filter((r) => (r.taker || "").trim() === "");
-      // опции фильтров — только встречающиеся в этом разделе
+      if (avail === "busy") parts.push(`taker=neq.`);
+      else if (avail === "free") parts.push(`taker=eq.`);
+      // полнотекстовый поиск по нескольким колонкам — через PostgREST `or=`
+      const term = (url.searchParams.get("q") || "").trim();
+      if (term) {
+        const t = encodeURIComponent(`*${term}*`);
+        parts.push(`or=(domain.ilike.${t},seller.ilike.${t},source.ilike.${t},` +
+          `team.ilike.${t},taker.ilike.${t},status.ilike.${t})`);
+      }
+
+      // прямой запрос с count=exact, чтобы знать total для пагинации
+      const qStr = parts.join("&") + (parts.length ? "&" : "") +
+        `order=id.desc&limit=${PAGE_SIZE}&offset=${offset}`;
+      const sbUrl = `${env.SUPABASE_URL.replace(/\/+$/, "")}/rest/v1/records?${qStr}`;
+      const resp = await fetch(sbUrl, {
+        headers: {
+          apikey: env.SUPABASE_SERVICE_KEY,
+          Authorization: "Bearer " + env.SUPABASE_SERVICE_KEY,
+          Prefer: "count=exact",
+        },
+      });
+      if (!resp.ok) {
+        return json({ error: "Supabase " + resp.status + ": " + await resp.text() }, 500);
+      }
+      const rows = await resp.json();
+      const cr = resp.headers.get("Content-Range") || "*/0";
+      const total = parseInt(cr.split("/").pop(), 10) || 0;
+
+      // опции фильтров — берём все записи (без пагинации), чтобы выпадашки
+      // содержали все возможные значения, не только из текущей страницы
+      const allQ = section === "all" ? "" : `section=eq.${enc(section)}&`;
       const all = await db.select("records",
-        `section=eq.${enc(section)}&select=geo,team,taker,source,status`);
+        `${allQ}select=geo,team,taker,source,status`);
       const opts = {};
       for (const f of LIST_FILTERS) {
         opts[f] = [...new Set(all.map((r) => r[f]).filter(Boolean))].sort();
       }
-      return json({ rows, options: opts });
+      return json({ rows, options: opts, total, page, page_size: PAGE_SIZE });
     }
 
     if (path === "record/save" && method === "POST") {
@@ -388,14 +415,15 @@ export async function onRequest(context) {
     }
 
     // ---- TELEGRAM ----
-    // Отправка одной заявки (селлер + конкретная сетка) в Telegram
+    // Отправка одной заявки (команда + селлер + конкретная сетка) в Telegram
     if (path === "sending/send_tg" && method === "POST") {
       const ids = (body.ids || []).map(String).filter(Boolean);
       const seller = (body.seller || "").trim();
       const source = (body.source || "").trim();
-      if (!seller || !ids.length)
-        return json({ error: "seller и ids обязательны" }, 400);
-      const result = await sendOneRequest(db, env, seller, source, ids);
+      const team = (body.team || "").trim();
+      if (!seller || !team || !ids.length)
+        return json({ error: "team, seller и ids обязательны" }, 400);
+      const result = await sendOneRequest(db, env, seller, team, source, ids);
       return json(result);
     }
 
@@ -421,7 +449,7 @@ export async function onRequest(context) {
       const results = [];
       for (const key of order) {
         const g = grouped[key];
-        const res = await sendOneRequest(db, env, g.seller, g.source, g.ids);
+        const res = await sendOneRequest(db, env, g.seller, team, g.source, g.ids);
         results.push({ seller: g.seller, source: g.source, ...res });
       }
       const ok = results.filter((r) => r.ok).length;
@@ -788,7 +816,7 @@ async function computeSimpleStats(db, period, value, team) {
 // Подготавливает текст по шаблону пары (seller, source) и отправляет
 // в её chat_id. Если для пары не задано переопределение — берёт базовые
 // поля селлера. НЕ помечает заявку как отправленную (это решает пользователь).
-async function sendOneRequest(db, env, sellerName, source, ids) {
+async function sendOneRequest(db, env, sellerName, team, source, ids) {
   const token = env.TELEGRAM_BOT_TOKEN;
   if (!token) return { ok: false, error: "TELEGRAM_BOT_TOKEN не задан в переменных окружения" };
 
@@ -798,29 +826,38 @@ async function sendOneRequest(db, env, sellerName, source, ids) {
   const seller = sellers[0];
   if (!seller) return { ok: false, error: `Селлер «${sellerName}» не найден` };
 
-  // ищем переопределение для пары (seller_id, source)
+  // === резолв по трём уровням ===
+  // 1) база: значения из sellers
   let chatId = (seller.chat_id || "").trim();
-  let tmpl = (seller.message_template || "").trim() || "{seller}\n{domains}";
+  let tmpl = (seller.message_template || "").trim();
   let domainTmpl = (seller.domain_template || "").trim();
-  let usedOverride = false;
-  if (source) {
-    const ovs = await db.select("seller_source_telegram",
-      `seller_id=eq.${enc(seller.id)}&source=eq.${enc(source)}` +
-      `&select=chat_id,message_template,domain_template`);
-    const ov = ovs[0];
-    if (ov) {
-      // chat_id — переопределяем только если в override он явно задан
+  let usedOverride = "base";
+
+  // 2) override по команде (team, source='')
+  // 3) override по (команде + сетке) — приоритетнее
+  // загружаем сразу оба, чтобы понять, какой применять
+  if (team) {
+    const ovs = await db.select("seller_overrides",
+      `seller_id=eq.${enc(seller.id)}&team=eq.${enc(team)}` +
+      `&select=team,source,chat_id,message_template,domain_template`);
+    // сначала ищем (team + source), потом просто (team)
+    const ovTeamSource = source ? ovs.find((o) => o.source === source) : null;
+    const ovTeam = ovs.find((o) => !o.source);
+    // применяем уровень «команда» сначала (если есть)
+    const apply = (ov) => {
+      if (!ov) return;
       if ((ov.chat_id || "").trim()) chatId = ov.chat_id.trim();
-      // message_template — переопределяем только если непустой
       if ((ov.message_template || "").trim()) tmpl = ov.message_template;
-      // domain_template — то же самое
       if ((ov.domain_template || "").trim()) domainTmpl = ov.domain_template;
-      usedOverride = true;
-    }
+    };
+    if (ovTeam) { apply(ovTeam); usedOverride = "team"; }
+    if (ovTeamSource) { apply(ovTeamSource); usedOverride = "team+source"; }
   }
 
+  if (!tmpl) tmpl = "{seller}\n{domains}";
+
   if (!chatId) return { ok: false,
-    error: `У «${sellerName}»${source ? ` (${source})` : ""} не указан Telegram chat_id` };
+    error: `У «${sellerName}» (${team}${source ? " · " + source : ""}) не указан Telegram chat_id` };
 
   // тянем сами строки заявки
   const inList = ids.map(enc).join(",");
@@ -828,10 +865,8 @@ async function sendOneRequest(db, env, sellerName, source, ids) {
     `id=in.(${inList})&order=source.asc,domain.asc`);
   if (!rows.length) return { ok: false, error: "Записи не найдены" };
 
-  // строим блок доменов:
-  // (1) если у пары задан domain_template — раскрываем его по каждой строке
-  //     (подстановки {domain} {geo} {source} {email} {ad_type}), склеиваем через \n\n.
-  // (2) если нет — старый одностроковый формат «сетка / гео / домен [/ почта]».
+  // строим блок доменов: если задан domain_template — раскрываем по строкам;
+  // иначе старый формат «сетка / гео / домен [/ почта]».
   let domainsBlock;
   if (domainTmpl) {
     domainsBlock = rows.map((r) => domainTmpl
@@ -850,9 +885,10 @@ async function sendOneRequest(db, env, sellerName, source, ids) {
   }
   const todayStr = new Date().toLocaleDateString("ru-RU");
 
-  // подстановки в основном шаблоне. {source} тоже доступен.
+  // подстановки в основном шаблоне.
   let text = tmpl
     .replaceAll("{seller}", sellerName)
+    .replaceAll("{team}",   team || "")
     .replaceAll("{source}", source || "")
     .replaceAll("{count}", String(rows.length))
     .replaceAll("{date}", todayStr)

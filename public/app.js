@@ -68,6 +68,7 @@ function renderNav() {
   $("nav").innerHTML = `
     <a href="#/domains" data-v="domains">Домены</a>
     <a href="#/reused" data-v="reused">Б/у</a>
+    <a href="#/all" data-v="all">Сводный</a>
     <a href="#/sorting" data-v="sorting">Сортировка</a>
     <div class="tab-drop"><a data-v="sending">На отправку ▾</a>
       <div class="tab-menu">${sendMenu}</div></div>
@@ -96,6 +97,7 @@ async function route() {
   try {
     if (view === "domains") await viewRecords("domains");
     else if (view === "reused") await viewRecords("reused");
+    else if (view === "all") await viewRecords("all");
     else if (view === "sorting") await viewSorting();
     else if (view === "sending") await viewSending(parts[1] || "0");
     else if (view === "moderation") await viewStatusQueue("moderation");
@@ -114,12 +116,21 @@ async function route() {
 async function viewRecords(section) {
   const params = new URLSearchParams(section === "reused" ? { section } : { section });
   const qs = new URLSearchParams(location.hash.split("?")[1] || "");
-  ["q", "avail", ...LIST_FILTERS.map((f) => f[0])].forEach((k) => {
+  ["q", "avail", "page", ...LIST_FILTERS.map((f) => f[0])].forEach((k) => {
     if (qs.get(k)) params.set(k, qs.get(k));
   });
   const data = await api("records?" + params.toString());
   const rows = data.rows;
-  const title = section === "reused" ? "Б/у (повторное использование)" : "Домены";
+  const total = data.total || rows.length;
+  const pageSize = data.page_size || 250;
+  const curPage = data.page || 0;
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const isAll = section === "all";
+  const title = isAll ? "Сводный лист"
+    : (section === "reused" ? "Б/у (повторное использование)" : "Домены");
+  const subtitle = isAll
+    ? "Все домены из «Домены» и «Б/у». Только просмотр, фильтрация и редактирование."
+    : null;
   const sel = {}; LIST_FILTERS.forEach(([f]) => sel[f] = qs.get(f) || "");
   const q = qs.get("q") || "";
 
@@ -135,16 +146,31 @@ async function viewRecords(section) {
     <option value="free" ${availVal === "free" ? "selected" : ""}>Свободен</option>
     <option value="busy" ${availVal === "busy" ? "selected" : ""}>Занят</option>
   </select>`;
+  // дополнительный фильтр «раздел» для сводного листа
+  const secVal = qs.get("sec") || "";
+  const secSelect = isAll ? `<select class="filter-sel" data-filter="sec">
+    <option value="">Раздел: все</option>
+    <option value="domains" ${secVal === "domains" ? "selected" : ""}>Домены</option>
+    <option value="reused"  ${secVal === "reused"  ? "selected" : ""}>Б/у</option>
+  </select>` : "";
 
-  const anyFilter = q || Object.values(sel).some(Boolean) || availVal;
+  // в «all» фильтр по секции применяем на клиенте, потому что бэкенд не знает «sec»
+  const visibleRows = (isAll && secVal)
+    ? rows.filter((r) => r.section === secVal) : rows;
 
-  const body = rows.map((r) => {
+  const anyFilter = q || Object.values(sel).some(Boolean) || availVal || secVal;
+
+  const body = visibleRows.map((r) => {
     const busy = (r.taker || "").trim() !== "";
     const availPill = busy
       ? `<span class="pill pill-busy">● занят</span>`
       : `<span class="pill pill-free">○ свободен</span>`;
+    const sectionCell = isAll
+      ? `<td><span class="pill ${r.section === "reused" ? "pill-Правки" : "pill-Принят"}" style="font-size:10px">${r.section === "reused" ? "Б/у" : "Домены"}</span></td>`
+      : "";
     return `
     <tr>
+      ${sectionCell}
       <td class="mono">${esc(r.domain)}</td>
       <td class="mono dim">${esc(r.server)}</td>
       <td>${esc(r.geo)}</td><td>${esc(r.seller)}</td><td>${esc(r.source)}</td>
@@ -160,29 +186,46 @@ async function viewRecords(section) {
     </tr>`;
   }).join("");
 
-  $("view").innerHTML = `
-    <div class="sec-head">
-      <div><h1>${esc(title)}</h1>
-        <div class="sub">${anyFilter ? "Найдено" : "Всего записей"}: ${rows.length}</div></div>
+  const sectionHeader = isAll ? `<th>Раздел</th>` : "";
+  // в сводном — без кнопок добавления
+  const headActions = isAll ? "" : `
       <div class="head-actions">
         <button class="btn btn-ghost" id="bulk-open">⊞ Оптом</button>
         <button class="btn" id="add-open">+ Добавить</button>
-      </div>
+      </div>`;
+
+  // блок пагинации (показываем, только если страниц больше одной)
+  const fromN = total === 0 ? 0 : curPage * pageSize + 1;
+  const toN = Math.min(total, curPage * pageSize + visibleRows.length);
+  const pagerBlock = totalPages > 1 ? `
+    <div class="pager">
+      <button class="btn btn-sm btn-ghost" id="page-prev" ${curPage === 0 ? "disabled" : ""}>← Назад</button>
+      <span class="pager-info">Страница <b>${curPage + 1}</b> из <b>${totalPages}</b> · показано ${fromN}–${toN} из ${total}</span>
+      <button class="btn btn-sm btn-ghost" id="page-next" ${curPage >= totalPages - 1 ? "disabled" : ""}>Вперёд →</button>
+    </div>` : "";
+
+  $("view").innerHTML = `
+    <div class="sec-head">
+      <div><h1>${esc(title)}</h1>
+        <div class="sub">${subtitle ? esc(subtitle) + " · " : ""}${anyFilter ? "Найдено" : "Всего записей"}: ${total}${totalPages > 1 ? ` · показано ${visibleRows.length} (стр. ${curPage + 1}/${totalPages})` : ""}</div></div>
+      ${headActions}
     </div>
     <div class="filter-bar">
       <input class="search" id="f-q" value="${esc(q)}" placeholder="Поиск: домен, селлер…">
-      ${filterSelects}${availSelect}
+      ${secSelect}${filterSelects}${availSelect}
       <button class="btn btn-sm" id="apply-filter">Применить</button>
       ${anyFilter ? `<a class="reset-link" id="reset-filter">Сбросить</a>` : ""}
     </div>
-    <div class="table-wrap">${rows.length ? `<table class="records-table">
-      <thead><tr><th>Домен</th><th>Сервер</th><th>ГЕО</th><th>Селлер</th><th>Сетка</th>
+    <div class="table-wrap">${visibleRows.length ? `<table class="records-table">
+      <thead><tr>${sectionHeader}<th>Домен</th><th>Сервер</th><th>ГЕО</th><th>Селлер</th><th>Сетка</th>
         <th>Команда</th><th>Рейтинг</th><th>Занятость</th><th>Дата</th><th>Кто взял</th>
         <th>Статус</th><th>Почта</th><th>Действия</th></tr></thead>
       <tbody>${body}</tbody></table>` :
-      `<div class="empty">Нет записей.</div>`}</div>`;
+      `<div class="empty">Нет записей.</div>`}</div>
+    ${pagerBlock}`;
 
   // wire filters
+  // фильтр сбрасывает страницу на первую
   const applyFilters = () => {
     const p = new URLSearchParams();
     const qv = $("f-q").value.trim(); if (qv) p.set("q", qv);
@@ -195,16 +238,29 @@ async function viewRecords(section) {
   $("f-q").addEventListener("keydown", (e) => { if (e.key === "Enter") applyFilters(); });
   document.querySelectorAll("[data-filter]").forEach((s) => s.onchange = applyFilters);
   if ($("reset-filter")) $("reset-filter").onclick = () => location.hash = `#/${section}`;
-  $("add-open").onclick = () => openRecordModal(section, null);
-  $("bulk-open").onclick = () => openBulkModal(section);
+  if ($("add-open")) $("add-open").onclick = () => openRecordModal(section, null);
+  if ($("bulk-open")) $("bulk-open").onclick = () => openBulkModal(section);
   document.querySelectorAll("[data-edit]").forEach((b) =>
-    b.onclick = () => openRecordModal(section, JSON.parse(b.dataset.edit)));
+    b.onclick = () => {
+      const r = JSON.parse(b.dataset.edit);
+      // в Сводном редактируем сохраняя оригинальную секцию записи,
+      // чтобы случайно не «перенести» её при сохранении
+      openRecordModal(r.section || section, r);
+    });
   document.querySelectorAll("[data-del]").forEach((b) =>
     b.onclick = async () => {
       if (!confirm("Удалить запись " + b.dataset.dom + "?")) return;
       await api("record/delete", { method: "POST", body: { id: b.dataset.del } });
       flash("Запись удалена"); route();
     });
+  // пагинация: меняем только параметр page в текущем URL
+  const gotoPage = (p) => {
+    const cur = new URLSearchParams(location.hash.split("?")[1] || "");
+    if (p === 0) cur.delete("page"); else cur.set("page", String(p));
+    location.hash = `#/${section}?${cur.toString()}`;
+  };
+  if ($("page-prev")) $("page-prev").onclick = () => { if (curPage > 0) gotoPage(curPage - 1); };
+  if ($("page-next")) $("page-next").onclick = () => { if (curPage < totalPages - 1) gotoPage(curPage + 1); };
 }
 
 // ---------- modal: single record ----------
@@ -498,14 +554,20 @@ async function viewSending(key) {
     chat_id: s.chat_id || "",
     overrides: s.overrides || [],
   }]));
-  // даёт effective chat_id для пары (seller, source): override → base
+  // даёт effective chat_id для тройки (seller, team, source).
+  // Приоритет: (team+source) > team > база.
   const effectiveChat = (seller, source) => {
     const info = sellerMap[seller];
     if (!info) return "";
+    const ovs = info.overrides.filter((o) => o.team === team);
+    // (team + source)
     if (source) {
-      const ov = info.overrides.find((o) => o.source === source);
+      const ov = ovs.find((o) => o.source === source);
       if (ov && (ov.chat_id || "").trim()) return ov.chat_id.trim();
     }
+    // (team) — без сетки
+    const ovT = ovs.find((o) => !o.source);
+    if (ovT && (ovT.chat_id || "").trim()) return ovT.chat_id.trim();
     return (info.chat_id || "").trim();
   };
 
@@ -574,7 +636,7 @@ async function viewSending(key) {
     b.disabled = true; b.textContent = "Отправка…";
     try {
       const r = await api("sending/send_tg", { method: "POST",
-        body: { ids: JSON.parse(b.dataset.tg), seller: b.dataset.seller, source: src } });
+        body: { ids: JSON.parse(b.dataset.tg), seller: b.dataset.seller, source: src, team } });
       if (r.ok) {
         b.textContent = "✓ Отправлено в TG";
         b.classList.add("copied");
@@ -1217,73 +1279,20 @@ async function viewSettings() {
   const teams = names("teams");
   const cards = Object.keys(REF_LABELS).map((table) => {
     const items = REFS[table] || [];
-    const sourceNames = names("sources");
     const list = items.map((it) => {
-      const tgBlock = table === "sellers" ? (() => {
-        const overrides = it.overrides || [];
-        const hasAny = !!it.chat_id || overrides.length > 0;
-        // существующие переопределения — превью + кнопка раскрытия
-        const overridesList = overrides.map((o) => `
-          <div class="tg-override" data-ov-id="${o.id}">
-            <div class="tg-override-head">
-              <span class="tg-override-src">${esc(o.source)}</span>
-              ${o.chat_id ? `<span class="tg-override-chat">chat ${esc(o.chat_id)}</span>` : `<span class="dim">(только шаблон)</span>`}
-              <button class="tg-override-toggle" data-ov-toggle="${o.id}">▾</button>
-              <button class="icon-btn" data-ov-del="${o.id}" data-ov-src="${esc(o.source)}" title="Удалить переопределение">✕</button>
-            </div>
-            <div class="tg-override-edit hidden" id="ov-edit-${o.id}">
-              <label>chat_id <span class="hint">(пусто → берётся базовый селлера)</span></label>
-              <input id="ov-chat-${o.id}" value="${esc(o.chat_id || "")}" placeholder="базовый">
-              <label>Шаблон сообщения <span class="hint">пусто → базовый</span></label>
-              <textarea id="ov-tmpl-${o.id}" rows="5" class="tg-tmpl">${esc(o.message_template || "")}</textarea>
-              <label>Шаблон одного домена <span class="hint">пусто → базовый</span></label>
-              <textarea id="ov-dtmpl-${o.id}" rows="5" class="tg-tmpl">${esc(o.domain_template || "")}</textarea>
-              <div class="tg-foot">
-                <button class="btn btn-sm" data-ov-save="${o.id}" data-seller-id="${it.id}" data-ov-src-value="${esc(o.source)}">Сохранить</button>
-              </div>
-            </div>
-          </div>`).join("");
-        // выпадающий список доступных сеток (исключая уже добавленные)
-        const usedSources = new Set(overrides.map((o) => o.source));
-        const availableSources = sourceNames.filter((s) => !usedSources.has(s));
-        const addBlock = availableSources.length ? `
-          <div class="tg-override-add">
-            <select id="ov-add-src-${it.id}">${availableSources.map((s) => `<option value="${esc(s)}">${esc(s)}</option>`).join("")}</select>
-            <button class="btn btn-sm" data-ov-add="${it.id}">+ Сетка</button>
-          </div>` : `<div class="dim" style="font-size:11px">все сетки уже переопределены</div>`;
-
-        return `
-        <div class="tg-block ${hasAny ? "tg-on" : ""}">
-          <button class="tg-toggle" data-tg-toggle="${it.id}" title="${hasAny ? "Telegram настроен" : "Настроить Telegram"}">
-            ${hasAny ? `✓ TG${overrides.length ? " +" + overrides.length : ""}` : "TG"}
-          </button>
-          <div class="tg-editor hidden" id="tg-edit-${it.id}">
-            <div class="tg-section-title">Базовые настройки</div>
-            <label>Telegram chat_id <span class="hint">(например, -1001234567890 для группы)</span></label>
-            <input id="tg-chat-${it.id}" value="${esc(it.chat_id || "")}" placeholder="-1001234567890">
-            <label>Шаблон сообщения <span class="hint">{seller} {source} {count} {date} {domains}</span></label>
-            <textarea id="tg-tmpl-${it.id}" rows="5" class="tg-tmpl">${esc(it.message_template || "{seller}\n{domains}")}</textarea>
-            <label>Шаблон одного домена <span class="hint">пусто → старый формат «сетка / гео / домен / почта». Доступно: {domain} {geo} {source} {email} {ad_type}</span></label>
-            <textarea id="tg-dtmpl-${it.id}" rows="5" class="tg-tmpl" placeholder="Domain URL: {domain}&#10;GEO: {geo}&#10;Time Zone: UTC+3&#10;Type of ADS: {ad_type}">${esc(it.domain_template || "")}</textarea>
-            <div class="tg-foot">
-              <button class="btn btn-sm" data-tg-save="${it.id}">Сохранить базовые</button>
-              <button class="btn btn-sm btn-ghost" data-tg-cancel="${it.id}">Закрыть</button>
-            </div>
-            <div class="tg-section-title" style="margin-top:14px">Переопределения по сеткам <span class="hint">для пары «селлер + сетка»</span></div>
-            ${overridesList || `<div class="dim" style="font-size:12px;padding:4px 0">нет переопределений — все сетки используют базовый шаблон</div>`}
-            ${addBlock}
-          </div>
-        </div>`;
-      })() : "";
+      const overrides = (table === "sellers") ? (it.overrides || []) : [];
+      const hasAny = (table === "sellers") && (!!it.chat_id || overrides.length > 0);
+      const tgBlock = (table === "sellers") ? `
+        <button class="tg-toggle ${hasAny ? "tg-on" : ""}" data-tg-open="${it.id}" title="${hasAny ? "Telegram настроен" : "Настроить Telegram"}">
+          ${hasAny ? `✓ TG${overrides.length ? " +" + overrides.length : ""}` : "TG"}
+        </button>` : "";
       return `
-      <div class="ref-item ref-item-block">
-        <div class="ref-item-row">
-          <input class="name-edit" value="${esc(it.name)}" data-ren="${it.id}" data-table="${table}">
-          ${table === "members" && it.team ? `<span class="team-tag">${esc(it.team)}</span>` : ""}
-          ${tgBlock}
-          <button class="icon-btn save" data-saveren="${it.id}" data-table="${table}" title="Сохранить имя">✓</button>
-          <button class="icon-btn" data-del="${it.id}" data-table="${table}" data-name="${esc(it.name)}" title="Удалить">✕</button>
-        </div>
+      <div class="ref-item">
+        <input class="name-edit" value="${esc(it.name)}" data-ren="${it.id}" data-table="${table}">
+        ${table === "members" && it.team ? `<span class="team-tag">${esc(it.team)}</span>` : ""}
+        ${tgBlock}
+        <button class="icon-btn save" data-saveren="${it.id}" data-table="${table}" title="Сохранить имя">✓</button>
+        <button class="icon-btn" data-del="${it.id}" data-table="${table}" data-name="${esc(it.name)}" title="Удалить">✕</button>
       </div>`;
     }).join("") || `<div class="dim">Пусто</div>`;
     const teamSel = table === "members"
@@ -1316,69 +1325,212 @@ async function viewSettings() {
     await api("ref", { method: "POST", body: { action: "delete", table: b.dataset.table, id: b.dataset.del } });
     flash("Удалено"); route();
   });
-  // Telegram-блок: раскрытие / сохранение / отмена
-  document.querySelectorAll("[data-tg-toggle]").forEach((b) => b.onclick = () => {
-    const id = b.dataset.tgToggle;
-    $("tg-edit-" + id).classList.toggle("hidden");
+  // Кнопка TG у селлера — открывает полноэкранный редактор настроек Telegram
+  document.querySelectorAll("[data-tg-open]").forEach((b) => b.onclick = () => {
+    openTgModal(parseInt(b.dataset.tgOpen, 10));
   });
-  document.querySelectorAll("[data-tg-cancel]").forEach((b) => b.onclick = () => {
-    $("tg-edit-" + b.dataset.tgCancel).classList.add("hidden");
-  });
-  document.querySelectorAll("[data-tg-save]").forEach((b) => b.onclick = async () => {
-    const id = b.dataset.tgSave;
-    const chatId = $("tg-chat-" + id).value.trim();
-    const tmpl = $("tg-tmpl-" + id).value;
-    const dtmpl = $("tg-dtmpl-" + id).value;
+}
+
+// ---------- модалка настроек Telegram для одного селлера ----------
+// Иерархия настроек:
+//   База селлера → Переопределение по команде → Переопределение по (команда + сетка)
+// Резолв при отправке: чем глубже уровень, тем приоритетнее (непустые поля
+// перекрывают вышестоящие).
+function openTgModal(sellerId) {
+  const seller = (REFS.sellers || []).find((s) => s.id === sellerId);
+  if (!seller) { alert("Селлер не найден"); return; }
+  const teams = names("teams");
+  const sources = names("sources");
+  const overrides = seller.overrides || [];
+
+  // строим список карточек переопределений: одна на команду (с источниками внутри)
+  const teamsUsed = [...new Set(overrides.map((o) => o.team))].sort();
+  const availableTeams = teams.filter((t) => !teamsUsed.includes(t));
+
+  const teamCards = teamsUsed.map((tm) => {
+    const ovTeam = overrides.find((o) => o.team === tm && !o.source);
+    const ovSources = overrides.filter((o) => o.team === tm && o.source);
+    const sourcesUsed = ovSources.map((o) => o.source);
+    const availableSrc = sources.filter((s) => !sourcesUsed.includes(s));
+    const sourceBlocks = ovSources.map((o) => `
+      <div class="tg-sub" data-ov-id="${o.id}">
+        <div class="tg-sub-head">
+          <span class="tg-pill src">${esc(o.source)}</span>
+          ${o.chat_id ? `<span class="dim mono small">chat ${esc(o.chat_id)}</span>` : `<span class="dim small">(шаблон без chat_id)</span>`}
+          <button class="icon-btn" data-ov-del="${o.id}" data-ov-label="${esc(tm)} · ${esc(o.source)}" title="Удалить">✕</button>
+        </div>
+        <label>chat_id <span class="hint">пусто → берётся из команды</span></label>
+        <input data-tg-field="chat_id" data-ov-id="${o.id}" value="${esc(o.chat_id || "")}" placeholder="наследуется">
+        <label>Шаблон сообщения <span class="hint">пусто → из команды</span></label>
+        <textarea data-tg-field="message_template" data-ov-id="${o.id}" rows="4" class="tg-tmpl">${esc(o.message_template || "")}</textarea>
+        <label>Шаблон одного домена <span class="hint">пусто → из команды</span></label>
+        <textarea data-tg-field="domain_template" data-ov-id="${o.id}" rows="4" class="tg-tmpl">${esc(o.domain_template || "")}</textarea>
+        <button class="btn btn-sm" data-ov-save="${o.id}" data-team="${esc(tm)}" data-source="${esc(o.source)}">Сохранить</button>
+      </div>`).join("");
+    const addSrcBlock = availableSrc.length ? `
+      <div class="tg-add-row">
+        <select id="add-src-${tm}-${seller.id}">${availableSrc.map((s) => `<option value="${esc(s)}">${esc(s)}</option>`).join("")}</select>
+        <button class="btn btn-sm" data-ov-add-src="${esc(tm)}">+ Сетка</button>
+      </div>` : `<div class="dim small">все сетки этой команды уже переопределены</div>`;
+
+    return `
+    <div class="tg-team-card">
+      <div class="tg-team-head">
+        <span class="tg-pill team">${esc(tm)}</span>
+        ${ovTeam && ovTeam.chat_id ? `<span class="dim mono small">chat ${esc(ovTeam.chat_id)}</span>` : ""}
+        <button class="icon-btn" data-team-remove="${esc(tm)}" title="Удалить все переопределения этой команды">✕ команда</button>
+      </div>
+      <label>chat_id команды <span class="hint">пусто → базовый селлера</span></label>
+      <input id="tm-chat-${tm}" data-team-field="chat_id" data-team="${esc(tm)}" value="${esc(ovTeam?.chat_id || "")}" placeholder="базовый селлера">
+      <label>Шаблон сообщения <span class="hint">пусто → базовый. {seller} {team} {source} {count} {date} {domains}</span></label>
+      <textarea id="tm-tmpl-${tm}" data-team-field="message_template" data-team="${esc(tm)}" rows="4" class="tg-tmpl">${esc(ovTeam?.message_template || "")}</textarea>
+      <label>Шаблон одного домена <span class="hint">пусто → базовый. {domain} {geo} {source} {email} {ad_type}</span></label>
+      <textarea id="tm-dtmpl-${tm}" data-team-field="domain_template" data-team="${esc(tm)}" rows="4" class="tg-tmpl">${esc(ovTeam?.domain_template || "")}</textarea>
+      <button class="btn btn-sm" data-team-save="${esc(tm)}">Сохранить настройки команды</button>
+
+      <div class="tg-team-subtitle">Уточнения по сеткам внутри «${esc(tm)}»</div>
+      ${sourceBlocks || `<div class="dim small">нет уточнений по сеткам — используются настройки команды</div>`}
+      ${addSrcBlock}
+    </div>`;
+  }).join("");
+
+  const addTeamBlock = availableTeams.length ? `
+    <div class="tg-add-row">
+      <select id="add-team-${seller.id}">${availableTeams.map((t) => `<option value="${esc(t)}">${esc(t)}</option>`).join("")}</select>
+      <button class="btn" data-team-add>+ Добавить команду</button>
+    </div>` : `<div class="dim">все команды уже настроены</div>`;
+
+  const modalHtml = `
+    <div class="modal-bg" id="tg-modal-bg">
+      <div class="modal modal-wide">
+        <div class="modal-head">
+          <h2>Telegram — ${esc(seller.name)}</h2>
+          <button class="icon-btn" id="tg-modal-close" title="Закрыть">✕</button>
+        </div>
+        <div class="modal-body">
+          <section class="tg-section">
+            <h3>Базовые настройки селлера</h3>
+            <div class="dim small">Используются, если для команды не задано переопределение.</div>
+            <label>chat_id <span class="hint">например, -1001234567890 для группы</span></label>
+            <input id="base-chat" value="${esc(seller.chat_id || "")}" placeholder="-1001234567890">
+            <label>Шаблон сообщения <span class="hint">{seller} {team} {source} {count} {date} {domains}</span></label>
+            <textarea id="base-tmpl" rows="5" class="tg-tmpl">${esc(seller.message_template || "")}</textarea>
+            <label>Шаблон одного домена <span class="hint">{domain} {geo} {source} {email} {ad_type}</span></label>
+            <textarea id="base-dtmpl" rows="5" class="tg-tmpl" placeholder="Domain URL: {domain}&#10;GEO: {geo}&#10;Time Zone: UTC+3&#10;Type of ADS: {ad_type}">${esc(seller.domain_template || "")}</textarea>
+            <button class="btn" id="base-save">Сохранить базовые</button>
+          </section>
+
+          <section class="tg-section">
+            <h3>Переопределения по командам</h3>
+            <div class="dim small">У каждой команды свой chat и/или шаблон. Внутри команды можно уточнить настройки по сеткам.</div>
+            ${teamCards || `<div class="dim" style="padding:10px 0">пока нет переопределений</div>`}
+            ${addTeamBlock}
+          </section>
+        </div>
+      </div>
+    </div>`;
+
+  // монтируем
+  const wrap = document.createElement("div");
+  wrap.innerHTML = modalHtml;
+  document.body.appendChild(wrap.firstElementChild);
+  const bg = $("tg-modal-bg");
+  const close = () => bg.remove();
+  $("tg-modal-close").onclick = close;
+  bg.onclick = (e) => { if (e.target === bg) close(); };
+
+  // ===== обработчики =====
+  // Базовые
+  $("base-save").onclick = async () => {
     try {
       await api("ref", { method: "POST", body: {
-        action: "update_tg", table: "sellers", id,
-        chat_id: chatId, message_template: tmpl, domain_template: dtmpl,
+        action: "update_tg", table: "sellers", id: seller.id,
+        chat_id: $("base-chat").value.trim(),
+        message_template: $("base-tmpl").value,
+        domain_template: $("base-dtmpl").value,
       }});
-      flash("Telegram-настройки сохранены"); route();
+      flash("Базовые настройки сохранены"); close(); viewSettings();
     } catch (e) { alert(e.message); }
-  });
-  // Переопределения: раскрытие/сохранение/удаление, добавление новой сетки
-  document.querySelectorAll("[data-ov-toggle]").forEach((b) => b.onclick = () => {
-    $("ov-edit-" + b.dataset.ovToggle).classList.toggle("hidden");
-  });
-  document.querySelectorAll("[data-ov-save]").forEach((b) => b.onclick = async () => {
-    const ovId = b.dataset.ovSave;
-    const sellerId = b.dataset.sellerId;
-    const source = b.dataset.ovSrcValue;
-    const chatId = $("ov-chat-" + ovId).value.trim();
-    const tmpl = $("ov-tmpl-" + ovId).value;
-    const dtmpl = $("ov-dtmpl-" + ovId).value;
+  };
+  // Сохранение настроек команды
+  document.querySelectorAll("[data-team-save]").forEach((b) => b.onclick = async () => {
+    const tm = b.dataset.teamSave;
     try {
       await api("ref", { method: "POST", body: {
         action: "update_tg_override", table: "sellers",
-        seller_id: sellerId, source,
-        chat_id: chatId, message_template: tmpl, domain_template: dtmpl,
+        seller_id: seller.id, team: tm, source: "",
+        chat_id: document.querySelector(`[data-team-field="chat_id"][data-team="${tm}"]`).value.trim(),
+        message_template: document.querySelector(`[data-team-field="message_template"][data-team="${tm}"]`).value,
+        domain_template: document.querySelector(`[data-team-field="domain_template"][data-team="${tm}"]`).value,
       }});
-      flash(`Переопределение «${source}» сохранено`); route();
+      flash(`Команда «${tm}» сохранена`); close(); openTgModal(seller.id);
     } catch (e) { alert(e.message); }
   });
-  document.querySelectorAll("[data-ov-del]").forEach((b) => b.onclick = async () => {
-    if (!confirm(`Удалить переопределение для сетки «${b.dataset.ovSrc}»?`)) return;
+  // Удалить ВСЕ переопределения команды
+  document.querySelectorAll("[data-team-remove]").forEach((b) => b.onclick = async () => {
+    const tm = b.dataset.teamRemove;
+    if (!confirm(`Удалить ВСЕ переопределения команды «${tm}» (включая уточнения по сеткам)?`)) return;
     try {
-      await api("ref", { method: "POST", body: {
-        action: "delete_tg_override", table: "sellers", id: b.dataset.ovDel,
-      }});
-      flash("Переопределение удалено"); route();
+      const targets = overrides.filter((o) => o.team === tm);
+      for (const o of targets) {
+        await api("ref", { method: "POST", body: {
+          action: "delete_tg_override", table: "sellers", id: o.id }});
+      }
+      flash("Команда удалена из переопределений"); close(); viewSettings();
     } catch (e) { alert(e.message); }
   });
-  document.querySelectorAll("[data-ov-add]").forEach((b) => b.onclick = async () => {
-    const sellerId = b.dataset.ovAdd;
-    const sel = $("ov-add-src-" + sellerId);
-    const source = sel.value;
-    if (!source) return;
+  // Добавить команду
+  const addTeamBtn = document.querySelector("[data-team-add]");
+  if (addTeamBtn) addTeamBtn.onclick = async () => {
+    const sel = $("add-team-" + seller.id);
+    const tm = sel.value;
+    if (!tm) return;
     try {
-      // создаём пустое переопределение — пользователь раскроет и заполнит
       await api("ref", { method: "POST", body: {
         action: "update_tg_override", table: "sellers",
-        seller_id: sellerId, source,
+        seller_id: seller.id, team: tm, source: "",
         chat_id: "", message_template: "", domain_template: "",
       }});
-      flash(`Добавлено переопределение «${source}»`); route();
+      close(); openTgModal(seller.id);
+    } catch (e) { alert(e.message); }
+  };
+  // Уточнения по сеткам: сохранить
+  document.querySelectorAll("[data-ov-save]").forEach((b) => b.onclick = async () => {
+    const ovId = b.dataset.ovSave;
+    const tm = b.dataset.team;
+    const src = b.dataset.source;
+    try {
+      await api("ref", { method: "POST", body: {
+        action: "update_tg_override", table: "sellers",
+        seller_id: seller.id, team: tm, source: src,
+        chat_id: document.querySelector(`[data-tg-field="chat_id"][data-ov-id="${ovId}"]`).value.trim(),
+        message_template: document.querySelector(`[data-tg-field="message_template"][data-ov-id="${ovId}"]`).value,
+        domain_template: document.querySelector(`[data-tg-field="domain_template"][data-ov-id="${ovId}"]`).value,
+      }});
+      flash(`«${tm} · ${src}» сохранено`); close(); openTgModal(seller.id);
+    } catch (e) { alert(e.message); }
+  });
+  // Уточнение по сетке: удалить
+  document.querySelectorAll("[data-ov-del]").forEach((b) => b.onclick = async () => {
+    if (!confirm(`Удалить уточнение «${b.dataset.ovLabel}»?`)) return;
+    try {
+      await api("ref", { method: "POST", body: {
+        action: "delete_tg_override", table: "sellers", id: b.dataset.ovDel }});
+      flash("Уточнение удалено"); close(); openTgModal(seller.id);
+    } catch (e) { alert(e.message); }
+  });
+  // Уточнение по сетке: добавить
+  document.querySelectorAll("[data-ov-add-src]").forEach((b) => b.onclick = async () => {
+    const tm = b.dataset.ovAddSrc;
+    const src = $("add-src-" + tm + "-" + seller.id).value;
+    if (!src) return;
+    try {
+      await api("ref", { method: "POST", body: {
+        action: "update_tg_override", table: "sellers",
+        seller_id: seller.id, team: tm, source: src,
+        chat_id: "", message_template: "", domain_template: "",
+      }});
+      close(); openTgModal(seller.id);
     } catch (e) { alert(e.message); }
   });
 }

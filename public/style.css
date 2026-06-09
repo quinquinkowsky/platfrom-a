@@ -605,3 +605,57 @@ a.seg-btn{text-decoration:none;display:inline-flex;align-items:center}
 .pill-Правки[title]{cursor:help}
 /* a.seg-btn используется как ссылка-фильтр */
 .filter-bar .seg a.seg-btn{text-decoration:none}
+
+/* ---------- модалка настроек Telegram у селлера ---------- */
+.modal-wide{ max-width:760px; width:90vw; max-height:90vh; display:flex;
+  flex-direction:column; padding:0; border-radius:14px; overflow:hidden }
+.modal-head{ display:flex; align-items:center; justify-content:space-between;
+  padding:18px 22px 14px; border-bottom:1px solid var(--line);
+  background:var(--panel) }
+.modal-head h2{ margin:0; font-size:18px; font-weight:600 }
+.modal-body{ padding:18px 22px 24px; overflow-y:auto; flex:1 }
+.tg-section{ margin-bottom:24px }
+.tg-section h3{ margin:0 0 6px; font-size:14px; font-weight:700;
+  text-transform:uppercase; letter-spacing:.6px; color:var(--accent) }
+.tg-section .dim.small, .small{ font-size:12px }
+.tg-section label{ display:block; margin-top:10px; margin-bottom:4px;
+  font-size:12px; color:var(--muted); font-weight:500 }
+.tg-section label .hint{ color:var(--muted); opacity:.7; font-weight:400;
+  font-family:"JetBrains Mono",monospace; font-size:10.5px; margin-left:6px }
+.tg-section input, .tg-section textarea.tg-tmpl{
+  width:100%; padding:8px 10px; background:var(--panel-2); border:1px solid var(--line);
+  border-radius:6px; color:var(--text); font-size:13px;
+  font-family:"JetBrains Mono",monospace; box-sizing:border-box }
+.tg-section textarea.tg-tmpl{ resize:vertical; min-height:80px; white-space:pre }
+.tg-section .btn{ margin-top:10px }
+.tg-team-card{ background:var(--panel-2); border:1px solid var(--line);
+  border-radius:10px; padding:14px; margin-top:10px }
+.tg-team-head{ display:flex; align-items:center; gap:10px; margin-bottom:6px }
+.tg-team-subtitle{ font-size:11px; text-transform:uppercase; letter-spacing:.5px;
+  color:var(--muted); margin:14px 0 4px; font-weight:600 }
+.tg-pill{ display:inline-block; padding:3px 9px; border-radius:6px;
+  font-size:11px; font-weight:700; letter-spacing:.3px }
+.tg-pill.team{ background:rgba(255,167,38,.12); color:var(--amber); border:1px solid var(--amber) }
+.tg-pill.src{  background:rgba(78,201,168,.12); color:var(--green); border:1px solid var(--green) }
+.tg-sub{ background:var(--panel); border:1px solid var(--line-soft);
+  border-radius:8px; padding:10px 12px; margin-top:8px }
+.tg-sub-head{ display:flex; align-items:center; gap:8px; margin-bottom:6px }
+.tg-add-row{ display:flex; gap:6px; align-items:center; margin-top:10px }
+.tg-add-row select{ flex:1; padding:6px 8px; background:var(--panel-2);
+  border:1px solid var(--line); border-radius:6px; color:var(--text); font-size:13px }
+@media (max-width: 768px) {
+  .modal-wide{ width:100vw; max-width:100vw; max-height:100vh; border-radius:0 }
+  .modal-head{ padding:14px 16px 12px }
+  .modal-body{ padding:14px 16px }
+}
+
+/* ---------- пагинация ---------- */
+.pager{ display:flex; align-items:center; justify-content:center; gap:16px;
+  padding:16px 12px; margin-top:8px }
+.pager-info{ color:var(--muted); font-size:13px }
+.pager-info b{ color:var(--text); font-family:"JetBrains Mono",monospace }
+.pager .btn:disabled{ opacity:.4; cursor:not-allowed }
+@media (max-width: 768px) {
+  .pager{ flex-wrap:wrap; gap:10px; padding:12px 8px 24px }
+  .pager-info{ flex-basis:100%; text-align:center; font-size:12px; order:-1 }
+}
