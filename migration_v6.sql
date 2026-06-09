@@ -40,6 +40,18 @@ CREATE TABLE IF NOT EXISTS domain_blacklist (
 );
 ALTER TABLE domain_blacklist ENABLE ROW LEVEL SECURITY;
 
+-- Кэш проверок ScamDoc на 30 дней. Все домены, прошедшие через ScamDoc,
+-- сюда складываются — и «отличные», и «слабые». При повторных задачах
+-- Worker сначала смотрит в кэш и не дёргает API, пока запись свежая.
+-- Низкий балл здесь = автоматический отсев на следующем круге.
+CREATE TABLE IF NOT EXISTS scam_cache (
+    domain      TEXT PRIMARY KEY,
+    trust_score INTEGER NOT NULL,
+    checked_at  TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_scam_cache_checked ON scam_cache(checked_at);
+ALTER TABLE scam_cache ENABLE ROW LEVEL SECURITY;
+
 -- Асинхронные задачи сканирования. Pages-Function создаёт запись со
 -- статусом 'pending', Worker берёт её и прокручивает партиями.
 CREATE TABLE IF NOT EXISTS scan_jobs (

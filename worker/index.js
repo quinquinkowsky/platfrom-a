@@ -169,9 +169,45 @@ async function refreshAuctionDomains(env) {
 }
 
 // ============================================================
-// ScamDoc и VirusTotal проверки
+// ScamDoc и VirusTotal проверки (с 30-дневным кэшем в Supabase)
 // ============================================================
-async function checkScamdoc(domain, env) {
+const CACHE_TTL_DAYS = 30;
+const CACHE_TTL_MS = CACHE_TTL_DAYS * 86400 * 1000;
+
+function isFresh(checkedAt) {
+  if (!checkedAt) return false;
+  const t = new Date(checkedAt).getTime();
+  return isFinite(t) && (Date.now() - t) < CACHE_TTL_MS;
+}
+
+async function cacheGet(db, table, domain) {
+  try {
+    const rows = await db.select(table, `domain=eq.${encodeURIComponent(domain)}`);
+    return rows && rows[0] ? rows[0] : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function cachePut(db, table, row) {
+  // upsert по domain (PRIMARY KEY)
+  try {
+    await db.upsert(table, [row]);
+  } catch (e) {
+    // не критично — кэш просто не запишется
+    console.error(`cache ${table} put failed:`, e.message || e);
+  }
+}
+
+async function checkScamdoc(domain, env, db) {
+  // 1) кэш
+  if (db) {
+    const cached = await cacheGet(db, "scam_cache", domain);
+    if (cached && isFresh(cached.checked_at)) {
+      return { ok: true, trust: cached.trust_score, cached: true };
+    }
+  }
+  // 2) API
   const url = "https://scampredictor.p.rapidapi.com/domain/" + domain;
   try {
     const r = await fetch(url, {
@@ -186,13 +222,21 @@ async function checkScamdoc(domain, env) {
     if (d.final_score == null) return { ok: false, code: 200, reason: "no_score" };
     const risk = parseFloat(d.final_score);
     const trust = Math.max(0, Math.min(100, Math.round((1 - risk) * 100)));
-    return { ok: true, trust };
+    // 3) запоминаем в кэш (поле в БД называется trust_score)
+    if (db) {
+      await cachePut(db, "scam_cache", {
+        domain, trust_score: trust, checked_at: new Date().toISOString(),
+      });
+    }
+    return { ok: true, trust, cached: false };
   } catch (e) {
     return { ok: false, code: 0, reason: String(e.message || e) };
   }
 }
 
 async function checkVirusTotal(domain, env) {
+  // VirusTotal без кэша: реальные блокировки могут появиться в любой
+  // момент, а лимит 4 req/min всё равно ограничивает скорость.
   try {
     const r = await fetch("https://www.virustotal.com/api/v3/domains/" + domain, {
       headers: { "x-apikey": env.VT_API_KEY },
@@ -201,10 +245,9 @@ async function checkVirusTotal(domain, env) {
     if (!r.ok) return { malicious: 0, suspicious: 0, clean: true, soft_fail: true };
     const data = await r.json();
     const s = (data.data && data.data.attributes && data.data.attributes.last_analysis_stats) || {};
-    return {
-      malicious: s.malicious || 0, suspicious: s.suspicious || 0,
-      clean: (s.malicious || 0) === 0 && (s.suspicious || 0) === 0,
-    };
+    const mal = s.malicious || 0;
+    const susp = s.suspicious || 0;
+    return { malicious: mal, suspicious: susp, clean: mal === 0 && susp === 0 };
   } catch (e) {
     return { malicious: 0, suspicious: 0, clean: true, soft_fail: true };
   }
@@ -232,27 +275,60 @@ async function advanceScanJob(env) {
               `&end_date=lte.${winEnd.toISOString()}` +
               `&order=end_date.asc`;
       if (job.max_price > 0) q += `&price=lte.${job.max_price}`;
-      const candidates = await db.select("auction_domains", q + "&limit=500");
+      const candidates = await db.select("auction_domains", q + "&limit=2000");
 
-      // исключаем чёрный список
-      const blackRows = await db.select("domain_blacklist", "select=domain&limit=100000");
+      // исключаем чёрный список (домены, которые уже приняли)
+      const blackRows = await db.select("domain_blacklist",
+        "select=domain&limit=100000");
       const blackset = new Set(blackRows.map((r) => r.domain));
-      const filtered = candidates.filter((c) => !blackset.has(c.domain));
+      let pool = candidates.filter((c) => !blackset.has(c.domain));
+
+      // Подтянем кэш ScamDoc для всех кандидатов одним запросом и применим:
+      //   - свежий кэш с баллом < min_sd_score → пропускаем сразу (не тратим API)
+      //   - свежий кэш с баллом ≥ min_sd_score → сохраним балл, чтобы взять без API
+      //   - нет кэша или истёк → ставим в очередь как обычно
+      const TTL_MS = CACHE_TTL_MS;
+      const tCutoff = new Date(Date.now() - TTL_MS).toISOString();
+      let cached = [];
+      try {
+        cached = await db.select("scam_cache",
+          `select=domain,trust_score,checked_at&checked_at=gte.${tCutoff}&limit=100000`);
+      } catch (_) { cached = []; }
+      const cacheMap = new Map(cached.map((c) => [c.domain, c.trust_score]));
+
+      const minSd = job.min_sd_score;
+      const filtered = pool.filter((c) => {
+        const score = cacheMap.get(c.domain);
+        if (score == null) return true;         // нет свежего кэша — проверим
+        return score >= minSd;                  // кэш ≥ порога — берём в очередь
+      });
+
+      // упорядочиваем: сначала те, у кого уже есть кэшированный балл (моментальный
+      // pickup), потом остальные (которым нужен реальный API-вызов)
+      filtered.sort((a, b) => {
+        const ca = cacheMap.has(a.domain) ? 1 : 0;
+        const cb = cacheMap.has(b.domain) ? 1 : 0;
+        if (ca !== cb) return cb - ca;          // сначала кэшированные
+        // среди прочих — ближе к концу аукциона
+        return new Date(a.end_date) - new Date(b.end_date);
+      });
 
       const need = (job.want_good || 0) + (job.want_great || 0);
       const total = Math.min(filtered.length, Math.max(need * 5, 30));
-      // запоминаем порядок (id) и идём по нему
       const seen = filtered.slice(0, total).map((c) => c.id);
+      const skippedByCache = pool.length - filtered.length;
       await db.update("scan_jobs", `id=eq.${job.id}`, {
         status: "running",
         step: "scamdoc",
         progress: 0,
         total: seen.length,
         seen_ids: seen,
-        logs: appendLog(job.logs, `Подобрали ${seen.length} кандидатов (всего в окне: ${filtered.length})`),
+        logs: appendLog(job.logs,
+          `Кандидатов в окне: ${pool.length}. Отсеяно кэшем (низкий балл): ${skippedByCache}. ` +
+          `Будем проверять: ${seen.length}.`),
         updated_at: new Date().toISOString(),
       });
-      return; // следующий тик начнёт ScamDoc
+      return;
     }
 
     // === Прогон ScamDoc партиями ===
@@ -290,27 +366,28 @@ async function advanceScanJob(env) {
 
       for (const r of ordered) {
         if (newGreat.length >= job.want_great && newGood.length >= job.want_good) break;
-        const res = await checkScamdoc(r.domain, env);
+        const res = await checkScamdoc(r.domain, env, db);
         if (!res.ok) {
           newLogs.push({ msg: `ScamDoc ? ${r.domain}: ${res.code} ${res.reason || ""}`,
             level: "warning", time: nowHm() });
           continue;
         }
         const score = res.trust;
+        const cachedMark = res.cached ? " ⚡" : "";
         if (score < job.min_sd_score) {
-          newLogs.push({ msg: `SKIP ${r.domain}: ${score}% (ниже ${job.min_sd_score})`,
+          newLogs.push({ msg: `SKIP ${r.domain}: ${score}%${cachedMark} (ниже ${job.min_sd_score})`,
             level: "dim", time: nowHm() });
           continue;
         }
         const entry = toEntry(r, score);
         if (score >= job.max_sd_score && newGreat.length < job.want_great) {
           newGreat.push(entry);
-          newLogs.push({ msg: `GREAT ${r.domain}: ${score}%`, level: "success", time: nowHm() });
+          newLogs.push({ msg: `GREAT ${r.domain}: ${score}%${cachedMark}`, level: "success", time: nowHm() });
         } else if (score < job.max_sd_score && newGood.length < job.want_good) {
           newGood.push(entry);
-          newLogs.push({ msg: `GOOD ${r.domain}: ${score}%`, level: "success", time: nowHm() });
+          newLogs.push({ msg: `GOOD ${r.domain}: ${score}%${cachedMark}`, level: "success", time: nowHm() });
         } else {
-          newLogs.push({ msg: `пропуск ${r.domain}: ${score}% (квота заполнена)`,
+          newLogs.push({ msg: `пропуск ${r.domain}: ${score}%${cachedMark} (квота заполнена)`,
             level: "dim", time: nowHm() });
         }
       }

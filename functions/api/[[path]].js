@@ -4,7 +4,7 @@ const FIELDS = ["domain","server","geo","seller","source","team","rating",
                 "comment","date_taken","taker","status"];
 const REQUIRED_FIELDS = ["domain","server","team","rating"];
 const FIELD_LABELS = { domain:"Домен", server:"Сервер", geo:"ГЕО", seller:"Селлер",
-  source:"Сетка", team:"Команда", rating:"Рейтинг", comment:"Комментарий",
+  source:"Сетка", team:"Команда", rating:"Рейтинг", comment:"Почта",
   date_taken:"Дата взятия в работу", taker:"Кто взял в работу", status:"Статус" };
 const SORT_STATUS = "На сортировку";
 const SENT_STATUS = "Модерация";
@@ -76,10 +76,23 @@ export async function onRequest(context) {
       for (const t of REF_TABLES) {
         if (t === "members") {
           out.members = await db.select("members", "select=id,name,team&order=name.asc");
+        } else if (t === "sellers") {
+          out.sellers = await db.select("sellers",
+            "select=id,name,chat_id,message_template&order=name.asc");
         } else {
           out[t] = await db.select(t, "select=id,name&order=name.asc");
         }
       }
+      // подтягиваем переопределения по парам «селлер + сетка»
+      const overrides = await db.select("seller_source_telegram",
+        "select=id,seller_id,source,chat_id,message_template&order=source.asc");
+      const bySeller = {};
+      for (const o of overrides) {
+        if (!bySeller[o.seller_id]) bySeller[o.seller_id] = [];
+        bySeller[o.seller_id].push(o);
+      }
+      out.sellers = out.sellers.map((s) =>
+        ({ ...s, overrides: bySeller[s.id] || [] }));
       return json(out);
     }
     if (path === "ref" && method === "POST") {
@@ -99,6 +112,46 @@ export async function onRequest(context) {
       }
       if (action === "delete") {
         await db.remove(table, `id=eq.${enc(body.id)}`);
+        return json({ ok: true });
+      }
+      // обновление telegram-полей у селлера
+      if (action === "update_tg" && table === "sellers") {
+        const patch = {};
+        if ("chat_id" in body) patch.chat_id = (body.chat_id || "").trim();
+        if ("message_template" in body) patch.message_template = body.message_template || "";
+        await db.update("sellers", `id=eq.${enc(body.id)}`, patch);
+        return json({ ok: true });
+      }
+      // создание / обновление переопределения «селлер + сетка»
+      if (action === "update_tg_override" && table === "sellers") {
+        const sellerId = body.seller_id;
+        const source = (body.source || "").trim();
+        if (!sellerId || !source)
+          return json({ error: "seller_id и source обязательны" }, 400);
+        const row = {
+          seller_id: sellerId, source,
+          chat_id: (body.chat_id || "").trim(),
+          message_template: body.message_template || "",
+        };
+        // upsert по (seller_id, source) — UNIQUE
+        try {
+          // пробуем найти существующее переопределение
+          const existing = await db.select("seller_source_telegram",
+            `seller_id=eq.${enc(sellerId)}&source=eq.${enc(source)}`);
+          if (existing.length) {
+            await db.update("seller_source_telegram",
+              `id=eq.${enc(existing[0].id)}`,
+              { chat_id: row.chat_id, message_template: row.message_template });
+          } else {
+            await db.insert("seller_source_telegram", [row]);
+          }
+        } catch (e) {
+          return json({ error: String(e.message || e) }, 500);
+        }
+        return json({ ok: true });
+      }
+      if (action === "delete_tg_override" && table === "sellers") {
+        await db.remove("seller_source_telegram", `id=eq.${enc(body.id)}`);
         return json({ ok: true });
       }
       return json({ error: "bad action" }, 400);
@@ -217,9 +270,11 @@ export async function onRequest(context) {
         { status: "На стоп", status_changed_at: today() });
 
       // 2) Клон в Б/у: копируем все поля, очищаем seller/date_taken/sort_group,
+      //    запоминаем предыдущего селлера (для информации при повторной сортировке),
       //    статус ставим «На сортировку», status_changed_at = сегодня
       const clone = {};
       for (const f of FIELDS) clone[f] = orig[f] ?? "";
+      clone.prev_seller = (orig.seller || "").trim();   // от кого «прилетел»
       clone.seller = "";
       clone.date_taken = null;
       clone.status = SORT_STATUS;
@@ -272,6 +327,14 @@ export async function onRequest(context) {
         { seller: (body.seller || "").trim() });
       return json({ ok: true });
     }
+    // Установить почту (хранится в comment) для одного домена.
+    // Используется из Сортировки и из «На отправку» (быстрый инлайн-ввод).
+    if (path === "record/set_email" && method === "POST") {
+      if (!body.id) return json({ error: "id обязателен" }, 400);
+      await db.update("records", `id=eq.${enc(body.id)}`,
+        { comment: (body.email || "").trim() });
+      return json({ ok: true });
+    }
 
     // ---- SENDING ----
     if (path === "sending" && method === "GET") {
@@ -279,18 +342,27 @@ export async function onRequest(context) {
       const rows = await db.select("records",
         `status=eq.${enc(SORT_STATUS)}&team=eq.${enc(team)}&seller=neq.` +
         `&order=seller.asc,source.asc,domain.asc`);
+      // Группировка по паре (селлер + сетка): одна карточка = одна пара.
+      // Это нужно, чтобы Telegram-отправка могла использовать свой шаблон
+      // и chat_id для каждой связки.
       const groups = {};
       const order = [];
       for (const r of rows) {
-        if (!groups[r.seller]) { groups[r.seller] = []; order.push(r.seller); }
-        groups[r.seller].push({ id: r.id, source: r.source, geo: r.geo, domain: r.domain });
+        const key = `${r.seller}|${r.source || ""}`;
+        if (!groups[key]) { groups[key] = { seller: r.seller, source: r.source || "", items: [] };
+          order.push(key); }
+        groups[key].items.push({ id: r.id, source: r.source, geo: r.geo,
+          domain: r.domain, email: r.comment || "" });
       }
-      const requests = order.map((seller) => {
-        const items = groups[seller];
-        const copy = seller + "\n" +
-          items.map((it) => `${it.source} / ${it.geo} / ${it.domain}`).join("\n");
-        return { seller, items, ids: items.map((i) => i.id),
-                 copy_text: copy, count: items.length };
+      // Строка в формате «сетка / гео / домен» — почта добавляется только если задана.
+      const fmtLine = (it) => `${it.source} / ${it.geo} / ${it.domain}` +
+        (it.email ? ` / ${it.email}` : "");
+      const requests = order.map((key) => {
+        const g = groups[key];
+        const copy = g.seller + "\n" + g.items.map(fmtLine).join("\n");
+        return { seller: g.seller, source: g.source, items: g.items,
+                 ids: g.items.map((i) => i.id),
+                 copy_text: copy, count: g.items.length };
       });
       return json({ requests, total: rows.length });
     }
@@ -303,6 +375,48 @@ export async function onRequest(context) {
           { status: SENT_STATUS, date_taken: d, status_changed_at: d });
       }
       return json({ ok: true, count: ids.length });
+    }
+
+    // ---- TELEGRAM ----
+    // Отправка одной заявки (селлер + конкретная сетка) в Telegram
+    if (path === "sending/send_tg" && method === "POST") {
+      const ids = (body.ids || []).map(String).filter(Boolean);
+      const seller = (body.seller || "").trim();
+      const source = (body.source || "").trim();
+      if (!seller || !ids.length)
+        return json({ error: "seller и ids обязательны" }, 400);
+      const result = await sendOneRequest(db, env, seller, source, ids);
+      return json(result);
+    }
+
+    // Отправка всех заявок одной команды в Telegram
+    if (path === "sending/send_tg_all" && method === "POST") {
+      const team = (body.team || "").trim();
+      if (!team) return json({ error: "team обязателен" }, 400);
+
+      // тянем все заявки и группируем по паре (селлер, сетка)
+      const rows = await db.select("records",
+        `status=eq.${enc(SORT_STATUS)}&team=eq.${enc(team)}&seller=neq.` +
+        `&order=seller.asc,source.asc,domain.asc`);
+      const grouped = {};
+      const order = [];
+      for (const r of rows) {
+        const key = `${r.seller}|${r.source || ""}`;
+        if (!grouped[key]) {
+          grouped[key] = { seller: r.seller, source: r.source || "", ids: [] };
+          order.push(key);
+        }
+        grouped[key].ids.push(r.id);
+      }
+      const results = [];
+      for (const key of order) {
+        const g = grouped[key];
+        const res = await sendOneRequest(db, env, g.seller, g.source, g.ids);
+        results.push({ seller: g.seller, source: g.source, ...res });
+      }
+      const ok = results.filter((r) => r.ok).length;
+      const failed = results.filter((r) => !r.ok);
+      return json({ ok: true, sent: ok, total: results.length, failed, results });
     }
 
     // ---- STATS ----
@@ -658,4 +772,81 @@ async function computeSimpleStats(db, period, value, team) {
     net_total: netRows.length,
     acc_total: accRows.length,
   };
+}
+
+// ---------- telegram ----------
+// Подготавливает текст по шаблону пары (seller, source) и отправляет
+// в её chat_id. Если для пары не задано переопределение — берёт базовые
+// поля селлера. НЕ помечает заявку как отправленную (это решает пользователь).
+async function sendOneRequest(db, env, sellerName, source, ids) {
+  const token = env.TELEGRAM_BOT_TOKEN;
+  if (!token) return { ok: false, error: "TELEGRAM_BOT_TOKEN не задан в переменных окружения" };
+
+  // тянем базовые настройки селлера + его id
+  const sellers = await db.select("sellers",
+    `name=eq.${enc(sellerName)}&select=id,chat_id,message_template`);
+  const seller = sellers[0];
+  if (!seller) return { ok: false, error: `Селлер «${sellerName}» не найден` };
+
+  // ищем переопределение для пары (seller_id, source)
+  let chatId = (seller.chat_id || "").trim();
+  let tmpl = (seller.message_template || "").trim() || "{seller}\n{domains}";
+  let usedOverride = false;
+  if (source) {
+    const ovs = await db.select("seller_source_telegram",
+      `seller_id=eq.${enc(seller.id)}&source=eq.${enc(source)}` +
+      `&select=chat_id,message_template`);
+    const ov = ovs[0];
+    if (ov) {
+      // chat_id — переопределяем только если в override он явно задан
+      if ((ov.chat_id || "").trim()) chatId = ov.chat_id.trim();
+      // template — то же самое, не пустой
+      if ((ov.message_template || "").trim()) tmpl = ov.message_template;
+      usedOverride = true;
+    }
+  }
+
+  if (!chatId) return { ok: false,
+    error: `У «${sellerName}»${source ? ` (${source})` : ""} не указан Telegram chat_id` };
+
+  // тянем сами строки заявки
+  const inList = ids.map(enc).join(",");
+  const rows = await db.select("records",
+    `id=in.(${inList})&order=source.asc,domain.asc`);
+  if (!rows.length) return { ok: false, error: "Записи не найдены" };
+
+  // строим многострочный блок доменов «сетка / гео / домен [/ почта]»
+  const domainsBlock = rows.map((r) => {
+    const base = `${r.source || ""} / ${r.geo || ""} / ${r.domain}`;
+    const email = (r.comment || "").trim();
+    return email ? `${base} / ${email}` : base;
+  }).join("\n");
+  const todayStr = new Date().toLocaleDateString("ru-RU");
+
+  // подстановки. {source} тоже доступен.
+  let text = tmpl
+    .replaceAll("{seller}", sellerName)
+    .replaceAll("{source}", source || "")
+    .replaceAll("{count}", String(rows.length))
+    .replaceAll("{date}", todayStr)
+    .replaceAll("{domains}", domainsBlock);
+
+  // обрезаем до 4096 символов (лимит Telegram)
+  if (text.length > 4090) text = text.slice(0, 4090) + "\n…";
+
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, text, disable_web_page_preview: true }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.ok === false) {
+      return { ok: false, error: data.description || `Telegram API ${res.status}` };
+    }
+    return { ok: true, used_override: usedOverride,
+             message_id: data.result && data.result.message_id };
+  } catch (e) {
+    return { ok: false, error: String(e.message || e) };
+  }
 }

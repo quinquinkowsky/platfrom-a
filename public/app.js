@@ -4,7 +4,7 @@ const FIELDS = ["domain","server","geo","seller","source","team","rating",
                 "comment","date_taken","taker","status"];
 const LABELS = {domain:"Домен",server:"Сервер",geo:"ГЕО",seller:"Селлер",
   source:"Сетка / источник",team:"Команда",rating:"Рейтинг",
-  comment:"Комментарий / почта",date_taken:"Дата взятия в работу",
+  comment:"Почта",date_taken:"Дата взятия в работу",
   taker:"Кто взял в работу",status:"Статус"};
 const OPT_FIELDS = ["server","geo","seller","source","team","taker","status","rating"];
 // поля, которые обязательно заполнять при создании/редактировании
@@ -178,7 +178,7 @@ async function viewRecords(section) {
     <div class="table-wrap">${rows.length ? `<table class="records-table">
       <thead><tr><th>Домен</th><th>Сервер</th><th>ГЕО</th><th>Селлер</th><th>Сетка</th>
         <th>Команда</th><th>Рейтинг</th><th>Занятость</th><th>Дата</th><th>Кто взял</th>
-        <th>Статус</th><th>Коммент</th><th>Действия</th></tr></thead>
+        <th>Статус</th><th>Почта</th><th>Действия</th></tr></thead>
       <tbody>${body}</tbody></table>` :
       `<div class="empty">Нет записей.</div>`}</div>`;
 
@@ -372,30 +372,114 @@ document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeModal
 
 // ---------- view: sorting ----------
 async function viewSorting() {
-  const { rows } = await api("sorting");
+  // фильтры передаются через хэш ?status=...&source=...
+  const qs = new URLSearchParams(location.hash.split("?")[1] || "");
+  const fStatus = qs.get("status") || "all";   // all | sorted | unsorted
+  const fSource = qs.get("source") || "";
+
+  const { rows: allRows } = await api("sorting");
   const sellers = names("sellers");
+
+  // применяем фильтры на клиенте
+  const rows = allRows.filter((r) => {
+    if (fStatus === "sorted" && !r.seller) return false;
+    if (fStatus === "unsorted" && r.seller) return false;
+    if (fSource && r.source !== fSource) return false;
+    return true;
+  });
+
+  // динамический список сеток — из того, что реально есть в Сортировке
+  const sourcesPresent = [...new Set(allRows.map((r) => r.source).filter(Boolean))].sort();
+
+  // помощник для URL фильтра
+  const link = (patch) => {
+    const p = new URLSearchParams({ status: fStatus, source: fSource });
+    for (const [k, v] of Object.entries(patch)) {
+      if (v === null || v === "") p.delete(k); else p.set(k, v);
+    }
+    return "#/sorting?" + p.toString();
+  };
+
   const body = rows.map((r) => {
-    const opts = sellers.map((s) =>
-      `<option value="${esc(s)}" ${r.seller === s ? "selected" : ""}>${esc(s)}</option>`).join("");
-    return `<tr>
+    const prev = (r.prev_seller || "").trim();
+    // в выпадашке подсвечиваем предыдущего селлера (был — не дублируем)
+    const opts = sellers.map((s) => {
+      const mark = (s === prev) ? " ⚠" : "";
+      return `<option value="${esc(s)}" ${r.seller === s ? "selected" : ""}>${esc(s)}${mark}${s === prev ? " (был)" : ""}</option>`;
+    }).join("");
+    return `<tr${prev ? ' class="row-with-prev"' : ""}>
       <td class="mono">${esc(r.domain)}</td><td>${esc(r.geo)}</td><td>${esc(r.team)}</td>
       <td>${esc(r.source)}</td><td>${esc(r.taker)}</td>
-      <td><select class="filter-sel" data-seller="${r.id}">
+      <td>${prev ? `<span class="pill pill-Правки" title="Этот домен ранее был у этого селлера — не назначайте его снова">⚠ был у ${esc(prev)}</span>` : `<span class="dim">—</span>`}</td>
+      <td><select class="filter-sel" data-seller="${r.id}" data-prev="${esc(prev)}">
         <option value="">— выбрать селлера —</option>${opts}</select></td>
+      <td><input class="email-input" data-email="${r.id}" value="${esc(r.comment || "")}" placeholder="почта"></td>
       <td>${r.seller ? `<span class="pill pill-Принят">✓ готово</span>` : `<span class="dim">ожидает</span>`}</td>
     </tr>`;
   }).join("");
+
+  // фильтр-бар
+  const sourceOpts = `<option value="">Все сетки</option>` +
+    sourcesPresent.map((s) => `<option value="${esc(s)}" ${fSource === s ? "selected" : ""}>${esc(s)}</option>`).join("");
+
+  const countAll = allRows.length;
+  const countSorted = allRows.filter((r) => r.seller).length;
+  const countUnsorted = countAll - countSorted;
+
   $("view").innerHTML = `
     <div class="sec-head"><div><h1>Сортировка</h1>
-      <div class="sub">Домены со статусом «На сортировку». Укажите селлера — он перенесётся в «Домены»/«Б/у», и заявка появится в «На отправку».</div></div></div>
+      <div class="sub">Домены со статусом «На сортировку». Укажите селлера и (по желанию) почту — она попадёт в карточку заявки и в Telegram-сообщение.</div></div></div>
+    <div class="filter-bar">
+      <div class="seg">
+        <a class="seg-btn ${fStatus === "all" ? "on" : ""}" href="${link({ status: "all" })}">Все · ${countAll}</a>
+        <a class="seg-btn ${fStatus === "unsorted" ? "on" : ""}" href="${link({ status: "unsorted" })}">Не отсортированные · ${countUnsorted}</a>
+        <a class="seg-btn ${fStatus === "sorted" ? "on" : ""}" href="${link({ status: "sorted" })}">Отсортированные · ${countSorted}</a>
+      </div>
+      <select class="filter-sel" id="src-sel">${sourceOpts}</select>
+      <span class="filter-applied">Показано: <b>${rows.length}</b> из <b>${allRows.length}</b></span>
+    </div>
     <div class="table-wrap">${rows.length ? `<table>
-      <thead><tr><th>Домен</th><th>ГЕО</th><th>Команда</th><th>Сетка</th><th>Кто взял</th><th>Селлер</th><th></th></tr></thead>
-      <tbody>${body}</tbody></table>` : `<div class="empty">Нет доменов на сортировке.</div>`}</div>`;
+      <thead><tr><th>Домен</th><th>ГЕО</th><th>Команда</th><th>Сетка</th><th>Кто взял</th><th>Был у</th><th>Селлер</th><th>Почта</th><th></th></tr></thead>
+      <tbody>${body}</tbody></table>` : `<div class="empty">Нет доменов под фильтр.</div>`}</div>`;
+
+  // фильтр по сетке — переход по ссылке
+  $("src-sel").onchange = (e) => { location.hash = link({ source: e.target.value }); };
+
+  // выбор селлера: если совпадает с prev — подтверждение
   document.querySelectorAll("[data-seller]").forEach((s) =>
     s.onchange = async () => {
-      await api("sorting/set_seller", { method: "POST", body: { id: s.dataset.seller, seller: s.value } });
+      const prev = (s.dataset.prev || "").trim();
+      const picked = s.value;
+      if (picked && prev && picked === prev) {
+        if (!confirm(`Вы выбираете «${picked}», у которого этот домен уже был раньше. Точно назначить снова?`)) {
+          // вернуть предыдущее значение, не сохранять
+          s.value = "";
+          return;
+        }
+      }
+      await api("sorting/set_seller", { method: "POST", body: { id: s.dataset.seller, seller: picked } });
       flash("Селлер указан и перенесён в Домены/Б-У"); route();
     });
+
+  // инлайн-сохранение почты при blur / Enter
+  const saveEmail = async (inp) => {
+    const id = inp.dataset.email;
+    if (inp.dataset.last === inp.value) return;
+    try {
+      await api("record/set_email", { method: "POST",
+        body: { id, email: inp.value } });
+      inp.dataset.last = inp.value;
+      inp.classList.add("saved");
+      setTimeout(() => inp.classList.remove("saved"), 800);
+    } catch (e) { alert("Ошибка: " + e.message); }
+  };
+  document.querySelectorAll("[data-email]").forEach((inp) => {
+    inp.dataset.last = inp.value;
+    inp.addEventListener("blur", () => saveEmail(inp));
+    inp.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); inp.blur(); }
+    });
+  });
 }
 
 // ---------- view: sending ----------
@@ -404,27 +488,62 @@ async function viewSending(key) {
   const idx = parseInt(key, 10);
   const team = teams[idx] !== undefined ? teams[idx] : key;
   const data = await api("sending?team=" + encodeURIComponent(team));
+
+  // map seller name -> {base chat_id, overrides[]} для оценки доступности TG по паре
+  const sellerMap = Object.fromEntries((REFS.sellers || []).map((s) => [s.name, {
+    chat_id: s.chat_id || "",
+    overrides: s.overrides || [],
+  }]));
+  // даёт effective chat_id для пары (seller, source): override → base
+  const effectiveChat = (seller, source) => {
+    const info = sellerMap[seller];
+    if (!info) return "";
+    if (source) {
+      const ov = info.overrides.find((o) => o.source === source);
+      if (ov && (ov.chat_id || "").trim()) return ov.chat_id.trim();
+    }
+    return (info.chat_id || "").trim();
+  };
+
   const tabs = teams.map((t, i) =>
     `<a class="btn ${t !== team ? "btn-ghost" : ""}" href="#/sending/${i}">${esc(t)}</a>`).join("");
-  const cards = data.requests.map((g) => `
+
+  const cards = data.requests.map((g) => {
+    const hasTg = !!effectiveChat(g.seller, g.source);
+    const tgBtn = hasTg
+      ? `<button class="btn btn-sm btn-tg" data-tg="${esc(JSON.stringify(g.ids))}" data-seller="${esc(g.seller)}" data-source="${esc(g.source)}" data-count="${g.count}">📨 Telegram</button>`
+      : `<button class="btn btn-sm btn-ghost" disabled title="Не задан chat_id для «${esc(g.seller)}» (сетка: ${esc(g.source) || "—"}). См. Справочники → Селлеры">📨 не настроен</button>`;
+    return `
     <div class="req-card">
       <div class="req-head">
-        <div><div class="req-seller">${esc(g.seller)}</div>
+        <div>
+          <div class="req-seller">${esc(g.seller)}${g.source ? ` <span class="req-source">· ${esc(g.source)}</span>` : ""}</div>
           <div class="req-count">${g.count} домен(ов)</div></div>
         <div class="req-actions">
           <button class="btn btn-sm btn-ghost copy-btn" data-copy="${esc(g.copy_text)}">⧉ Скопировать</button>
+          ${tgBtn}
           <button class="btn btn-sm btn-sent" data-sent="${esc(JSON.stringify(g.ids))}"
             data-seller="${esc(g.seller)}" data-count="${g.count}" data-key="${idx}">✓ Отправлено</button>
         </div>
       </div>
-      <table class="req-table"><thead><tr><th>Сетка</th><th>ГЕО</th><th>Домен</th></tr></thead>
+      <table class="req-table"><thead><tr><th>ГЕО</th><th>Домен</th><th>Почта</th></tr></thead>
         <tbody>${g.items.map((it) =>
-          `<tr><td>${esc(it.source)}</td><td>${esc(it.geo)}</td><td class="mono">${esc(it.domain)}</td></tr>`).join("")}</tbody>
-      </table></div>`).join("");
+          `<tr><td>${esc(it.geo)}</td><td class="mono">${esc(it.domain)}</td>
+            <td><input class="email-input" data-email="${it.id}" value="${esc(it.email || "")}" placeholder="почта"></td>
+          </tr>`).join("")}</tbody>
+      </table></div>`;
+  }).join("");
+
+  // кнопка «Отправить всё» в шапке — только если есть заявки с настроенным TG
+  const anyTg = data.requests.some((g) => !!effectiveChat(g.seller, g.source));
+  const sendAllBtn = anyTg
+    ? `<button class="btn btn-tg" id="tg-all" data-team="${esc(team)}">📨 Отправить всё в Telegram</button>`
+    : "";
+
   $("view").innerHTML = `
     <div class="sec-head"><div><h1>На отправку — ${esc(team)}</h1>
       <div class="sub">Домены сгруппированы в заявки по селлеру. Всего доменов: ${data.total}.</div></div>
-      <div class="head-actions">${tabs}</div></div>
+      <div class="head-actions">${sendAllBtn}${tabs}</div></div>
     ${data.requests.length ? `<div class="req-grid">${cards}</div>` :
       `<div class="table-wrap"><div class="empty">Нет заявок для «${esc(team)}». Домены появляются после указания селлера в «Сортировке».</div></div>`}`;
 
@@ -440,6 +559,63 @@ async function viewSending(key) {
     if (!confirm(`Отметить ${b.dataset.count} домен(ов) селлера «${b.dataset.seller}» как отправленные?\nИм будет проставлена сегодняшняя дата и статус «Модерация».`)) return;
     await api("sending/mark_sent", { method: "POST", body: { ids: JSON.parse(b.dataset.sent) } });
     flash("Отправлено: статус «Модерация», сегодняшняя дата"); route();
+  });
+  // Telegram: одна заявка
+  document.querySelectorAll("[data-tg]").forEach((b) => b.onclick = async () => {
+    const src = b.dataset.source || "";
+    const label = b.dataset.seller + (src ? ` · ${src}` : "");
+    if (!confirm(`Отправить ${b.dataset.count} домен(ов) — ${label} — в Telegram?\nЗаявка НЕ будет автоматически помечена как «Отправлено» — это вы решаете руками.`)) return;
+    const orig = b.textContent;
+    b.disabled = true; b.textContent = "Отправка…";
+    try {
+      const r = await api("sending/send_tg", { method: "POST",
+        body: { ids: JSON.parse(b.dataset.tg), seller: b.dataset.seller, source: src } });
+      if (r.ok) {
+        b.textContent = "✓ Отправлено в TG";
+        b.classList.add("copied");
+        flash("Сообщение отправлено в Telegram");
+      } else {
+        b.textContent = orig; b.disabled = false;
+        alert("Ошибка Telegram: " + (r.error || "неизвестно"));
+      }
+    } catch (e) { b.textContent = orig; b.disabled = false; alert("Ошибка: " + e.message); }
+  });
+  // Telegram: всё разом
+  const allBtn = $("tg-all");
+  if (allBtn) allBtn.onclick = async () => {
+    const tgCards = data.requests.filter((g) => !!effectiveChat(g.seller, g.source));
+    if (!tgCards.length) return;
+    if (!confirm(`Отправить в Telegram ${tgCards.length} заявок (${tgCards.reduce((a,g)=>a+g.count,0)} доменов)?\nЗаявки НЕ будут автоматически помечены как «Отправлено».`)) return;
+    allBtn.disabled = true; allBtn.textContent = "Отправка…";
+    try {
+      const r = await api("sending/send_tg_all", { method: "POST", body: { team } });
+      const failed = (r.failed || []);
+      if (failed.length === 0) {
+        flash(`Отправлено заявок: ${r.sent}`);
+      } else {
+        const msg = failed.map(f => `«${f.seller}${f.source ? " · " + f.source : ""}»: ${f.error}`).join("\n");
+        alert(`Отправлено: ${r.sent} из ${r.total}.\nНе удалось:\n${msg}`);
+      }
+      route();
+    } catch (e) { alert("Ошибка: " + e.message); allBtn.disabled = false; }
+  };
+  // инлайн-сохранение почты в каждой строке таблицы заявки
+  document.querySelectorAll(".req-card [data-email]").forEach((inp) => {
+    inp.dataset.last = inp.value;
+    const save = async () => {
+      if (inp.dataset.last === inp.value) return;
+      try {
+        await api("record/set_email", { method: "POST",
+          body: { id: inp.dataset.email, email: inp.value } });
+        inp.dataset.last = inp.value;
+        inp.classList.add("saved");
+        setTimeout(() => inp.classList.remove("saved"), 800);
+      } catch (e) { alert("Ошибка: " + e.message); }
+    };
+    inp.addEventListener("blur", save);
+    inp.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); inp.blur(); }
+    });
   });
 }
 function fallbackCopy(text, done) {
@@ -1032,13 +1208,71 @@ async function viewSettings() {
   const teams = names("teams");
   const cards = Object.keys(REF_LABELS).map((table) => {
     const items = REFS[table] || [];
-    const list = items.map((it) => `
-      <div class="ref-item">
-        <input class="name-edit" value="${esc(it.name)}" data-ren="${it.id}" data-table="${table}">
-        ${table === "members" && it.team ? `<span class="team-tag">${esc(it.team)}</span>` : ""}
-        <button class="icon-btn save" data-saveren="${it.id}" data-table="${table}" title="Сохранить">✓</button>
-        <button class="icon-btn" data-del="${it.id}" data-table="${table}" data-name="${esc(it.name)}" title="Удалить">✕</button>
-      </div>`).join("") || `<div class="dim">Пусто</div>`;
+    const sourceNames = names("sources");
+    const list = items.map((it) => {
+      const tgBlock = table === "sellers" ? (() => {
+        const overrides = it.overrides || [];
+        const hasAny = !!it.chat_id || overrides.length > 0;
+        // существующие переопределения — превью + кнопка раскрытия
+        const overridesList = overrides.map((o) => `
+          <div class="tg-override" data-ov-id="${o.id}">
+            <div class="tg-override-head">
+              <span class="tg-override-src">${esc(o.source)}</span>
+              ${o.chat_id ? `<span class="tg-override-chat">chat ${esc(o.chat_id)}</span>` : `<span class="dim">(только шаблон)</span>`}
+              <button class="tg-override-toggle" data-ov-toggle="${o.id}">▾</button>
+              <button class="icon-btn" data-ov-del="${o.id}" data-ov-src="${esc(o.source)}" title="Удалить переопределение">✕</button>
+            </div>
+            <div class="tg-override-edit hidden" id="ov-edit-${o.id}">
+              <label>chat_id <span class="hint">(пусто → берётся базовый селлера)</span></label>
+              <input id="ov-chat-${o.id}" value="${esc(o.chat_id || "")}" placeholder="базовый">
+              <label>Шаблон <span class="hint">пусто → базовый. Доступно: {source}</span></label>
+              <textarea id="ov-tmpl-${o.id}" rows="5" class="tg-tmpl">${esc(o.message_template || "")}</textarea>
+              <div class="tg-foot">
+                <button class="btn btn-sm" data-ov-save="${o.id}" data-seller-id="${it.id}" data-ov-src-value="${esc(o.source)}">Сохранить</button>
+              </div>
+            </div>
+          </div>`).join("");
+        // выпадающий список доступных сеток (исключая уже добавленные)
+        const usedSources = new Set(overrides.map((o) => o.source));
+        const availableSources = sourceNames.filter((s) => !usedSources.has(s));
+        const addBlock = availableSources.length ? `
+          <div class="tg-override-add">
+            <select id="ov-add-src-${it.id}">${availableSources.map((s) => `<option value="${esc(s)}">${esc(s)}</option>`).join("")}</select>
+            <button class="btn btn-sm" data-ov-add="${it.id}">+ Сетка</button>
+          </div>` : `<div class="dim" style="font-size:11px">все сетки уже переопределены</div>`;
+
+        return `
+        <div class="tg-block ${hasAny ? "tg-on" : ""}">
+          <button class="tg-toggle" data-tg-toggle="${it.id}" title="${hasAny ? "Telegram настроен" : "Настроить Telegram"}">
+            ${hasAny ? `✓ TG${overrides.length ? " +" + overrides.length : ""}` : "TG"}
+          </button>
+          <div class="tg-editor hidden" id="tg-edit-${it.id}">
+            <div class="tg-section-title">Базовые настройки</div>
+            <label>Telegram chat_id <span class="hint">(например, -1001234567890 для группы)</span></label>
+            <input id="tg-chat-${it.id}" value="${esc(it.chat_id || "")}" placeholder="-1001234567890">
+            <label>Шаблон сообщения <span class="hint">{seller} {source} {count} {date} {domains}</span></label>
+            <textarea id="tg-tmpl-${it.id}" rows="5" class="tg-tmpl">${esc(it.message_template || "{seller}\n{domains}")}</textarea>
+            <div class="tg-foot">
+              <button class="btn btn-sm" data-tg-save="${it.id}">Сохранить базовые</button>
+              <button class="btn btn-sm btn-ghost" data-tg-cancel="${it.id}">Закрыть</button>
+            </div>
+            <div class="tg-section-title" style="margin-top:14px">Переопределения по сеткам <span class="hint">для пары «селлер + сетка»</span></div>
+            ${overridesList || `<div class="dim" style="font-size:12px;padding:4px 0">нет переопределений — все сетки используют базовый шаблон</div>`}
+            ${addBlock}
+          </div>
+        </div>`;
+      })() : "";
+      return `
+      <div class="ref-item ref-item-block">
+        <div class="ref-item-row">
+          <input class="name-edit" value="${esc(it.name)}" data-ren="${it.id}" data-table="${table}">
+          ${table === "members" && it.team ? `<span class="team-tag">${esc(it.team)}</span>` : ""}
+          ${tgBlock}
+          <button class="icon-btn save" data-saveren="${it.id}" data-table="${table}" title="Сохранить имя">✓</button>
+          <button class="icon-btn" data-del="${it.id}" data-table="${table}" data-name="${esc(it.name)}" title="Удалить">✕</button>
+        </div>
+      </div>`;
+    }).join("") || `<div class="dim">Пусто</div>`;
     const teamSel = table === "members"
       ? `<select id="addteam-${table}"><option value="">— команда —</option>${teams.map((t) => `<option value="${esc(t)}">${esc(t)}</option>`).join("")}</select>` : "";
     return `<div class="ref-card"><h3>${REF_LABELS[table]} <span class="dim" style="font-weight:400">· ${items.length}</span></h3>
@@ -1048,7 +1282,7 @@ async function viewSettings() {
   }).join("");
   $("view").innerHTML = `
     <div class="sec-head"><div><h1>Справочники</h1>
-      <div class="sub">Команды, участники, сервера, источники, селлеры, статусы и ГЕО. Подставляются в выпадающие списки.</div></div></div>
+      <div class="sub">Команды, участники, сервера, источники, селлеры, статусы и ГЕО. У селлеров можно настроить Telegram chat_id и шаблон сообщения.</div></div></div>
     <div class="ref-grid">${cards}</div>`;
 
   document.querySelectorAll("[data-add]").forEach((b) => b.onclick = async () => {
@@ -1068,6 +1302,66 @@ async function viewSettings() {
     if (!confirm(`Удалить «${b.dataset.name}» из справочника?`)) return;
     await api("ref", { method: "POST", body: { action: "delete", table: b.dataset.table, id: b.dataset.del } });
     flash("Удалено"); route();
+  });
+  // Telegram-блок: раскрытие / сохранение / отмена
+  document.querySelectorAll("[data-tg-toggle]").forEach((b) => b.onclick = () => {
+    const id = b.dataset.tgToggle;
+    $("tg-edit-" + id).classList.toggle("hidden");
+  });
+  document.querySelectorAll("[data-tg-cancel]").forEach((b) => b.onclick = () => {
+    $("tg-edit-" + b.dataset.tgCancel).classList.add("hidden");
+  });
+  document.querySelectorAll("[data-tg-save]").forEach((b) => b.onclick = async () => {
+    const id = b.dataset.tgSave;
+    const chatId = $("tg-chat-" + id).value.trim();
+    const tmpl = $("tg-tmpl-" + id).value;
+    try {
+      await api("ref", { method: "POST", body: {
+        action: "update_tg", table: "sellers", id, chat_id: chatId, message_template: tmpl,
+      }});
+      flash("Telegram-настройки сохранены"); route();
+    } catch (e) { alert(e.message); }
+  });
+  // Переопределения: раскрытие/сохранение/удаление, добавление новой сетки
+  document.querySelectorAll("[data-ov-toggle]").forEach((b) => b.onclick = () => {
+    $("ov-edit-" + b.dataset.ovToggle).classList.toggle("hidden");
+  });
+  document.querySelectorAll("[data-ov-save]").forEach((b) => b.onclick = async () => {
+    const ovId = b.dataset.ovSave;
+    const sellerId = b.dataset.sellerId;
+    const source = b.dataset.ovSrcValue;
+    const chatId = $("ov-chat-" + ovId).value.trim();
+    const tmpl = $("ov-tmpl-" + ovId).value;
+    try {
+      await api("ref", { method: "POST", body: {
+        action: "update_tg_override", table: "sellers",
+        seller_id: sellerId, source, chat_id: chatId, message_template: tmpl,
+      }});
+      flash(`Переопределение «${source}» сохранено`); route();
+    } catch (e) { alert(e.message); }
+  });
+  document.querySelectorAll("[data-ov-del]").forEach((b) => b.onclick = async () => {
+    if (!confirm(`Удалить переопределение для сетки «${b.dataset.ovSrc}»?`)) return;
+    try {
+      await api("ref", { method: "POST", body: {
+        action: "delete_tg_override", table: "sellers", id: b.dataset.ovDel,
+      }});
+      flash("Переопределение удалено"); route();
+    } catch (e) { alert(e.message); }
+  });
+  document.querySelectorAll("[data-ov-add]").forEach((b) => b.onclick = async () => {
+    const sellerId = b.dataset.ovAdd;
+    const sel = $("ov-add-src-" + sellerId);
+    const source = sel.value;
+    if (!source) return;
+    try {
+      // создаём пустое переопределение — пользователь раскроет и заполнит
+      await api("ref", { method: "POST", body: {
+        action: "update_tg_override", table: "sellers",
+        seller_id: sellerId, source, chat_id: "", message_template: "",
+      }});
+      flash(`Добавлено переопределение «${source}»`); route();
+    } catch (e) { alert(e.message); }
   });
 }
 
